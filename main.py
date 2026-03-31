@@ -426,7 +426,6 @@ def carregar_tarefas(obra_id):
     resp = supabase.table("obras_tarefas")\
         .select("*, responsavel:equipe!obras_tarefas_responsavel_id_fkey(nome), aprovador:equipe!obras_tarefas_aprovador_id_fkey(nome)")\
         .eq("obra_id", obra_id)\
-        .order("gut_score", desc=True)\
         .execute()
     return resp.data
 
@@ -443,8 +442,7 @@ def carregar_alertas():
             .gte("entrega_prevista", hoje.isoformat())\
             .execute()
         return resp.data
-    except:
-        return []
+    except: return []
 
 def calcular_farol(entrega_prevista, status):
     if status in ("Concluído","N/A"): return "✅"
@@ -496,6 +494,11 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
 
     STATUS_OPCOES = ["A Iniciar","Em Andamento","Impedido","Concluído","N/A"]
 
+    # inicializa estado de ordenação
+    if "ordem_col"  not in st.session_state: st.session_state["ordem_col"]  = "gut_score"
+    if "ordem_asc"  not in st.session_state: st.session_state["ordem_asc"]  = False
+    if "fechar_alerta" not in st.session_state: st.session_state["fechar_alerta"] = False
+
     obras        = carregar_obras_ativas()
     equipe_lista = carregar_equipe_ativa()
     equipe_nomes = [e["nome"] for e in equipe_lista]
@@ -504,85 +507,86 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
     if not obras:
         st.error("Nenhuma obra cadastrada."); st.stop()
 
-    # ── SIDEBAR: SELEÇÃO + CABEÇALHO FIXO ────────────────
-    st.sidebar.divider()
-    st.sidebar.markdown("### 🏗️ Súmula")
+    # ── ALERTA COMPACTO ───────────────────────────────────
+    if not st.session_state["fechar_alerta"]:
+        alertas = carregar_alertas()
+        if alertas:
+            a1, a2 = st.columns([11,1])
+            with a1:
+                with st.expander(f"⚠️ {len(alertas)} tarefa(s) vencem em até 2 dias", expanded=False):
+                    for a in alertas:
+                        obra_nome = (a.get("obras") or {}).get("nome","?")
+                        st.caption(f"📌 {obra_nome} · {a['descricao']} · `{a.get('entrega_prevista','?')}`")
+            with a2:
+                if st.button("✕", key="fechar_alerta_btn", help="Fechar alertas"):
+                    st.session_state["fechar_alerta"] = True
+                    st.rerun()
 
-    # Botão atualizar
-    if st.sidebar.button("🔄 Atualizar dados"):
-        limpar_cache(); st.rerun()
+    # ── SELEÇÃO DE OBRA + FILTROS (PÁGINA PRINCIPAL) ──────
+    with st.container():
+        r1c1, r1c2, r1c3 = st.columns([1,3,1])
 
-    # Filtro status obra
-    status_disponiveis = sorted(set(o.get("status") or "—" for o in obras))
-    filtro_status_obra = st.sidebar.selectbox(
-        "Status da obra", ["Todos"] + status_disponiveis, key="sb_status_obra")
+        status_disponiveis = sorted(set(o.get("status") or "—" for o in obras))
+        filtro_status_obra = r1c1.selectbox("Status da obra",
+            ["Todos"] + status_disponiveis, key="filt_obra_status", label_visibility="collapsed")
 
-    obras_filtradas = obras if filtro_status_obra == "Todos" \
-        else [o for o in obras if o.get("status") == filtro_status_obra]
+        obras_filtradas = obras if filtro_status_obra == "Todos" \
+            else [o for o in obras if o.get("status") == filtro_status_obra]
 
-    if not obras_filtradas:
-        st.sidebar.warning("Nenhuma obra com este status."); st.stop()
+        # último update
+        try:
+            upd = supabase.table("obras_tarefas").select("obra_id, created_at")\
+                .order("created_at", desc=True).execute().data
+            ultimo_upd = {}
+            for u in upd:
+                if u["obra_id"] not in ultimo_upd:
+                    ultimo_upd[u["obra_id"]] = u.get("created_at","")[:10]
+        except: ultimo_upd = {}
 
-    # Último update por obra
-    try:
-        upd = supabase.table("obras_tarefas")\
-            .select("obra_id, created_at")\
-            .order("created_at", desc=True).execute().data
-        ultimo_upd = {}
-        for u in upd:
-            if u["obra_id"] not in ultimo_upd:
-                ultimo_upd[u["obra_id"]] = u.get("created_at","")[:10]
-    except:
-        ultimo_upd = {}
+        def label_obra(o):
+            upd_str = ultimo_upd.get(o["id"])
+            return f"{o['codigo']} — {o['nome']}" + (f" · 🕐{upd_str}" if upd_str else "")
 
-    def label_obra(o):
-        upd_str = ultimo_upd.get(o["id"])
-        return f"{o['codigo']} — {o['nome']}" + (f"\n🕐 {upd_str}" if upd_str else "")
+        opcoes_obras = {label_obra(o): o["id"] for o in obras_filtradas}
+        if not opcoes_obras:
+            st.warning("Nenhuma obra com este status."); st.stop()
 
-    opcoes_obras = {label_obra(o): o["id"] for o in obras_filtradas}
-    obra_label   = st.sidebar.selectbox("Obra", list(opcoes_obras.keys()), key="sb_obra")
-    obra_id      = opcoes_obras[obra_label]
+        obra_label = r1c2.selectbox("Obra", list(opcoes_obras.keys()),
+            key="sel_obra", label_visibility="collapsed")
+        obra_id = opcoes_obras[obra_label]
 
-    # Carregar tarefas
+        if r1c3.button("🔄 Atualizar", key="btn_refresh"):
+            limpar_cache(); st.rerun()
+
+    # carrega tarefas
     tarefas = carregar_tarefas(obra_id)
 
-    # Métricas na sidebar
+    # ── MÉTRICAS COMPACTAS ────────────────────────────────
     if tarefas:
         total      = len(tarefas)
         concluidas = sum(1 for t in tarefas if t["status"] == "Concluído")
         atrasadas  = sum(1 for t in tarefas if calcular_farol(t.get("entrega_prevista"), t["status"]) == "🔴")
         impedidas  = sum(1 for t in tarefas if t["status"] == "Impedido")
         pct        = int(concluidas / total * 100) if total else 0
-        st.sidebar.progress(pct/100, text=f"Avanço: {pct}%")
-        st.sidebar.caption(f"📋 {total} tarefas · ✅ {concluidas} · 🔴 {atrasadas} · 🚧 {impedidas}")
+        st.progress(pct/100)
+        st.caption(f"**{pct}% concluído** · 📋 {total} · ✅ {concluidas} · 🔴 {atrasadas} · 🚧 {impedidas}")
 
-    # Filtros na sidebar
-    st.sidebar.markdown("**Filtros**")
+    # ── FILTROS INLINE ────────────────────────────────────
     etapas_disp = sorted(set(t.get("etapa") or "—" for t in tarefas if t.get("etapa")))
-    f_etapa  = st.sidebar.selectbox("Etapa",  ["Todas"]  + etapas_disp,  key="sb_etapa")
-    f_status = st.sidebar.selectbox("Status", ["Todos"]  + STATUS_OPCOES, key="sb_fstatus")
-    f_resp   = st.sidebar.selectbox("Resp.",  ["Todos"]  + equipe_nomes,  key="sb_resp")
-    f_gut    = st.sidebar.selectbox("GUT",    ["Todos","🔴 Alto (≥75)","🟡 Médio (27–74)","🟢 Baixo (<27)"], key="sb_gut")
-    f_conc   = st.sidebar.checkbox("Mostrar Concluídas/N/A", value=False, key="sb_conc")
-
-    # ── ÁREA PRINCIPAL ────────────────────────────────────
-    st.header("🏗️ Súmula de Obra")
-
-    # Alertas — ícone clicável
-    alertas = carregar_alertas()
-    if alertas:
-        with st.expander(f"⚠️ {len(alertas)} tarefa(s) vencem em até 2 dias — clique para ver", expanded=False):
-            for a in alertas:
-                obra_nome = (a.get("obras") or {}).get("nome","?")
-                st.markdown(f"- **{obra_nome}** · {a['descricao']} · `{a.get('entrega_prevista','?')}`")
+    fc1,fc2,fc3,fc4,fc5 = st.columns([2,2,2,2,1])
+    f_etapa  = fc1.selectbox("Etapa",  ["Todas"]  + etapas_disp,   key="f_etapa",  label_visibility="collapsed")
+    f_status = fc2.selectbox("Status", ["Todos"]  + STATUS_OPCOES, key="f_fstatus", label_visibility="collapsed")
+    f_resp   = fc3.selectbox("Resp.",  ["Todos"]  + equipe_nomes,  key="f_resp",   label_visibility="collapsed")
+    f_gut    = fc4.selectbox("GUT",    ["Todos","🔴 Alto","🟡 Médio","🟢 Baixo"], key="f_gut", label_visibility="collapsed")
+    f_conc   = fc5.checkbox("✅+N/A", value=False, key="f_conc")
 
     # ── NOVA TAREFA ───────────────────────────────────────
     with st.expander("➕ Nova tarefa", expanded=False):
-        template         = carregar_template()
-        etapas_template  = sorted(set(t.get("etapa","") for t in template if t.get("etapa")))
-        etapas_obra      = sorted(set(t.get("etapa","") for t in tarefas  if t.get("etapa")))
-        etapas_combo     = sorted(set(etapas_template + etapas_obra))
-        desc_por_etapa   = {}
+        template        = carregar_template()
+        etapas_template = sorted(set(t.get("etapa","") for t in template if t.get("etapa")))
+        etapas_obra     = sorted(set(t.get("etapa","") for t in tarefas  if t.get("etapa")))
+        etapas_combo    = sorted(set(etapas_template + etapas_obra))
+        desc_por_etapa  = {}
         for t in template + tarefas:
             ep = t.get("etapa","")
             desc_por_etapa.setdefault(ep,[]).append(t.get("descricao",""))
@@ -597,30 +601,29 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
         descs = sorted(set(desc_por_etapa.get(n_etapa,[]))) if n_etapa_sel != "(nova)" else []
         if descs:
             n_desc_sel = st.selectbox("Descrição sugerida", ["(escrever)"]+descs, key="n_desc_sel")
-            n_desc     = st.text_input("Descrição", key="n_desc_livre") \
-                         if n_desc_sel == "(escrever)" else n_desc_sel
+            n_desc = st.text_input("Descrição", key="n_desc_livre") \
+                     if n_desc_sel == "(escrever)" else n_desc_sel
         else:
             n_desc = st.text_input("Descrição", key="n_desc_livre2")
-
-        n_obs = st.text_area("Observação", key="n_obs", height=60)
+        n_obs = st.text_area("Observação", key="n_obs", height=50)
 
         nr1,nr2,nr3,nr4 = st.columns(4)
-        n_r = nr1.selectbox("R — Responsável", equipe_nomes, key="n_r")
-        n_a = nr2.selectbox("A — Aprovador",   ["—"]+equipe_nomes, key="n_a")
-        n_c = nr3.selectbox("C — Consultado",  ["—"]+equipe_nomes, key="n_c")
-        n_i = nr4.selectbox("I — Informado",   ["—"]+equipe_nomes, key="n_i")
+        n_r = nr1.selectbox("R", equipe_nomes, key="n_r")
+        n_a = nr2.selectbox("A", ["—"]+equipe_nomes, key="n_a")
+        n_c = nr3.selectbox("C", ["—"]+equipe_nomes, key="n_c")
+        n_i = nr4.selectbox("I", ["—"]+equipe_nomes, key="n_i")
 
         nd1,nd2 = st.columns(2)
-        n_inicio  = nd1.date_input("Início previsto",  value=None, key="n_ini", format="DD/MM/YYYY")
-        n_entrega = nd2.date_input("Entrega prevista", value=None, key="n_ent", format="DD/MM/YYYY")
+        n_inicio  = nd1.date_input("Início", value=None, key="n_ini", format="DD/MM/YYYY")
+        n_entrega = nd2.date_input("Entrega", value=None, key="n_ent", format="DD/MM/YYYY")
 
         ng1,ng2,ng3,ng4 = st.columns(4)
         n_g = ng1.slider("G",1,5,1,key="n_g")
         n_u = ng2.slider("U",1,5,1,key="n_u")
         n_t = ng3.slider("T",1,5,1,key="n_t")
-        ng4.metric("Score GUT", n_g*n_u*n_t)
+        ng4.metric("GUT", n_g*n_u*n_t)
 
-        if st.button("💾 Criar tarefa", type="primary", key="btn_nova"):
+        if st.button("💾 Criar", type="primary", key="btn_nova"):
             if n_desc:
                 supabase.table("obras_tarefas").insert({
                     "obra_id":          obra_id,
@@ -635,14 +638,10 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
                     "status":           n_status,
                     "inicio_previsto":  n_inicio.isoformat()  if n_inicio  else None,
                     "entrega_prevista": n_entrega.isoformat() if n_entrega else None,
-                    "gut_gravidade":    n_g,
-                    "gut_urgencia":     n_u,
-                    "gut_tendencia":    n_t,
-                    "gut_score":        n_g*n_u*n_t,
-                    "avanco_percent":   0,
+                    "gut_gravidade":    n_g, "gut_urgencia": n_u, "gut_tendencia": n_t,
+                    "gut_score":        n_g*n_u*n_t, "avanco_percent": 0,
                 }).execute()
-                limpar_cache()
-                st.success("✅ Tarefa criada!"); st.rerun()
+                limpar_cache(); st.success("✅ Criada!"); st.rerun()
             else:
                 st.warning("Descrição é obrigatória.")
 
@@ -654,36 +653,65 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
         template = carregar_template()
         if template and st.button("📋 Criar do Template", type="primary"):
             supabase.table("obras_tarefas").insert([{
-                "obra_id":       obra_id,
-                "item":          str(t.get("item","")),
-                "etapa":         t.get("etapa"),
-                "descricao":     t.get("descricao"),
-                "status":        t.get("status_padrao") or "A Iniciar",
-                "gut_gravidade": 1,"gut_urgencia":1,"gut_tendencia":1,
-                "gut_score":     1,"avanco_percent":0,
+                "obra_id": obra_id, "item": str(t.get("item","")),
+                "etapa": t.get("etapa"), "descricao": t.get("descricao"),
+                "status": t.get("status_padrao") or "A Iniciar",
+                "gut_gravidade":1,"gut_urgencia":1,"gut_tendencia":1,
+                "gut_score":1,"avanco_percent":0,
             } for t in template]).execute()
-            limpar_cache(); st.success("✅ Tarefas criadas!"); st.rerun()
+            limpar_cache(); st.rerun()
         st.stop()
 
     # ── APLICA FILTROS ────────────────────────────────────
     tf = tarefas
-    if not f_conc:   tf = [t for t in tf if t["status"] not in ("Concluído","N/A")]
+    if not f_conc:      tf = [t for t in tf if t["status"] not in ("Concluído","N/A")]
     if f_etapa  != "Todas":  tf = [t for t in tf if t.get("etapa") == f_etapa]
-    if f_status != "Todos":  tf = [t for t in tf if t["status"]    == f_status]
+    if f_status != "Todos":  tf = [t for t in tf if t["status"] == f_status]
     if f_resp   != "Todos":  tf = [t for t in tf if (t.get("responsavel") or {}).get("nome") == f_resp]
     if "Alto"   in f_gut:    tf = [t for t in tf if (t.get("gut_score") or 1) >= 75]
     elif "Médio" in f_gut:   tf = [t for t in tf if 27 <= (t.get("gut_score") or 1) < 75]
     elif "Baixo" in f_gut:   tf = [t for t in tf if (t.get("gut_score") or 1) < 27]
 
-    st.caption(f"Exibindo **{len(tf)}** tarefa(s) · ordenadas por GUT ↓")
+    # ── ORDENAÇÃO ─────────────────────────────────────────
+    def sort_key(t, col):
+        v = t.get(col)
+        if v is None: return ""
+        return str(v)
 
-    # ── CABEÇALHO DA TABELA ───────────────────────────────
-    hcols = st.columns([1,1,3,2,2,1,1])
-    for col, label in zip(hcols, ["GUT","Etapa","Descrição","Resp.","Status","Desv.","Av."]):
-        col.markdown(f"<small><b>{label}</b></small>", unsafe_allow_html=True)
+    tf = sorted(tf, key=lambda t: sort_key(t, st.session_state["ordem_col"]),
+                reverse=not st.session_state["ordem_asc"])
+
+    st.caption(f"**{len(tf)}** tarefa(s)")
+
+    # ── CABEÇALHO COM BOTÕES DE ORDENAÇÃO ─────────────────
+    def btn_ord(label, col, width):
+        seta = ""
+        if st.session_state["ordem_col"] == col:
+            seta = " ▲" if st.session_state["ordem_asc"] else " ▼"
+        return f"{label}{seta}"
+
+    hcols = st.columns([1,1,3,2,2,1,1,1])
+    headers = [
+        ("GUT","gut_score"),("Etapa","etapa"),("Descrição","descricao"),
+        ("Resp.","responsavel"),("Status","status"),("Desv.","entrega_prevista"),
+        ("Av.","avanco_percent"),("","")
+    ]
+    for col, (label, chave) in zip(hcols, headers):
+        if chave:
+            if col.button(btn_ord(label, chave, 1), key=f"ord_{chave}",
+                          use_container_width=True):
+                if st.session_state["ordem_col"] == chave:
+                    st.session_state["ordem_asc"] = not st.session_state["ordem_asc"]
+                else:
+                    st.session_state["ordem_col"] = chave
+                    st.session_state["ordem_asc"] = True
+                st.rerun()
+        else:
+            col.markdown("")
+
     st.divider()
 
-    # ── LINHAS ────────────────────────────────────────────
+    # ── LINHAS COMPACTAS ──────────────────────────────────
     for t in tf:
         farol     = calcular_farol(t.get("entrega_prevista"), t["status"])
         desvio    = calcular_desvio(t.get("entrega_prevista"), t.get("entrega_real"), t["status"])
@@ -691,62 +719,77 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
         gut_str   = gut_emoji(t.get("gut_score") or 1)
         avanco    = t.get("avanco_percent") or 0
 
-        c1,c2,c3,c4,c5,c6,c7 = st.columns([1,1,3,2,2,1,1])
-        c1.markdown(f"<small>{gut_str}</small>",                              unsafe_allow_html=True)
-        c2.markdown(f"<small>{t.get('etapa') or '—'}</small>",                unsafe_allow_html=True)
-        c3.markdown(f"<small>{farol} {t.get('descricao') or '—'}</small>",    unsafe_allow_html=True)
-        c4.markdown(f"<small>{resp_nome}</small>",                             unsafe_allow_html=True)
-        c5.markdown(f"<small>{t['status']}</small>",                           unsafe_allow_html=True)
-        c6.markdown(f"<small>{desvio}</small>",                                unsafe_allow_html=True)
-        c7.markdown(f"<small>{avanco}%</small>",                               unsafe_allow_html=True)
+        # linha principal + botão editar na mesma linha
+        c1,c2,c3,c4,c5,c6,c7,c8 = st.columns([1,1,3,2,2,1,1,1])
+        c1.markdown(f"<small>{gut_str}</small>",                            unsafe_allow_html=True)
+        c2.markdown(f"<small>{t.get('etapa') or '—'}</small>",              unsafe_allow_html=True)
+        c3.markdown(f"<small>{farol} {t.get('descricao') or '—'}</small>",  unsafe_allow_html=True)
+        c4.markdown(f"<small>{resp_nome}</small>",                           unsafe_allow_html=True)
+        c5.markdown(f"<small>{t['status']}</small>",                         unsafe_allow_html=True)
+        c6.markdown(f"<small>{desvio}</small>",                              unsafe_allow_html=True)
+        c7.markdown(f"<small>{avanco}%</small>",                             unsafe_allow_html=True)
 
-        with st.expander("✏️", expanded=False):
-            ea,eb,ec = st.columns(3)
-            r_nome = ea.selectbox("R",equipe_nomes,
-                index=equipe_nomes.index(resp_nome) if resp_nome in equipe_nomes else 0,
-                key=f"r_{t['id']}")
-            a_nome = eb.selectbox("A",["—"]+equipe_nomes, key=f"a_{t['id']}")
-            c_nome = ec.selectbox("C",["—"]+equipe_nomes, key=f"c_{t['id']}")
-            i_nome = ea.selectbox("I",["—"]+equipe_nomes, key=f"i_{t['id']}")
+        # botão editar — abre/fecha via session_state
+        edit_key = f"edit_{t['id']}"
+        if edit_key not in st.session_state:
+            st.session_state[edit_key] = False
+        if c8.button("✏️", key=f"btn_edit_{t['id']}"):
+            st.session_state[edit_key] = not st.session_state[edit_key]
+            st.rerun()
 
-            novo_status = eb.selectbox("Status", STATUS_OPCOES,
-                index=STATUS_OPCOES.index(t["status"]) if t["status"] in STATUS_OPCOES else 0,
-                key=f"st_{t['id']}")
-            novo_avanco = ec.slider("% Avanço",0,100,avanco,step=5,key=f"av_{t['id']}")
+        # painel de edição — aparece logo abaixo da linha
+        if st.session_state[edit_key]:
+            with st.container():
+                ea,eb,ec = st.columns(3)
+                r_nome = ea.selectbox("R", equipe_nomes,
+                    index=equipe_nomes.index(resp_nome) if resp_nome in equipe_nomes else 0,
+                    key=f"r_{t['id']}")
+                a_nome = eb.selectbox("A",["—"]+equipe_nomes, key=f"a_{t['id']}")
+                c_nome = ec.selectbox("C",["—"]+equipe_nomes, key=f"c_{t['id']}")
+                i_nome = ea.selectbox("I",["—"]+equipe_nomes, key=f"i_{t['id']}")
 
-            novo_imp = t.get("impedimento") or ""
-            if novo_status == "Impedido":
-                novo_imp = st.text_input("🚧 Impedimento", value=novo_imp, key=f"imp_{t['id']}")
+                novo_status = eb.selectbox("Status", STATUS_OPCOES,
+                    index=STATUS_OPCOES.index(t["status"]) if t["status"] in STATUS_OPCOES else 0,
+                    key=f"st_{t['id']}")
+                novo_avanco = ec.slider("% Avanço",0,100,avanco,step=5,key=f"av_{t['id']}")
 
-            fd1,fd2,fd3 = st.columns(3)
-            novo_inicio  = fd1.date_input("Início prev.", value=parse_date(t.get("inicio_previsto")),  key=f"ini_{t['id']}", format="DD/MM/YYYY")
-            novo_entrega = fd2.date_input("Entrega prev.",value=parse_date(t.get("entrega_prevista")), key=f"ent_{t['id']}", format="DD/MM/YYYY")
-            novo_real    = fd3.date_input("Entrega real", value=parse_date(t.get("entrega_real")),     key=f"real_{t['id']}", format="DD/MM/YYYY")
+                novo_imp = t.get("impedimento") or ""
+                if novo_status == "Impedido":
+                    novo_imp = st.text_input("🚧 Impedimento", value=novo_imp, key=f"imp_{t['id']}")
 
-            gg1,gg2,gg3,gg4 = st.columns(4)
-            ng = gg1.slider("G",1,5,t.get("gut_gravidade") or 1,key=f"g_{t['id']}")
-            nu = gg2.slider("U",1,5,t.get("gut_urgencia")  or 1,key=f"u_{t['id']}")
-            nt = gg3.slider("T",1,5,t.get("gut_tendencia") or 1,key=f"te_{t['id']}")
-            gg4.metric("Score", ng*nu*nt)
+                fd1,fd2,fd3 = st.columns(3)
+                novo_inicio  = fd1.date_input("Início",  value=parse_date(t.get("inicio_previsto")),  key=f"ini_{t['id']}", format="DD/MM/YYYY")
+                novo_entrega = fd2.date_input("Entrega", value=parse_date(t.get("entrega_prevista")), key=f"ent_{t['id']}", format="DD/MM/YYYY")
+                novo_real    = fd3.date_input("Real",    value=parse_date(t.get("entrega_real")),     key=f"real_{t['id']}", format="DD/MM/YYYY")
 
-            novo_obs = st.text_area("Observações", value=t.get("observacoes") or "",
-                key=f"obs_{t['id']}", height=60)
+                gg1,gg2,gg3,gg4 = st.columns(4)
+                ng = gg1.slider("G",1,5,t.get("gut_gravidade") or 1,key=f"g_{t['id']}")
+                nu = gg2.slider("U",1,5,t.get("gut_urgencia")  or 1,key=f"u_{t['id']}")
+                nt = gg3.slider("T",1,5,t.get("gut_tendencia") or 1,key=f"te_{t['id']}")
+                gg4.metric("GUT", ng*nu*nt)
 
-            if st.button("💾 Salvar", key=f"save_{t['id']}", type="primary"):
-                supabase.table("obras_tarefas").update({
-                    "responsavel_id":   equipe_ids.get(r_nome),
-                    "aprovador_id":     equipe_ids.get(a_nome) if a_nome != "—" else None,
-                    "consultado_id":    equipe_ids.get(c_nome) if c_nome != "—" else None,
-                    "informado_id":     equipe_ids.get(i_nome) if i_nome != "—" else None,
-                    "status":           novo_status,
-                    "impedimento":      novo_imp or None,
-                    "avanco_percent":   novo_avanco,
-                    "inicio_previsto":  novo_inicio.isoformat()  if novo_inicio  else None,
-                    "entrega_prevista": novo_entrega.isoformat() if novo_entrega else None,
-                    "entrega_real":     novo_real.isoformat()    if novo_real    else None,
-                    "gut_gravidade":    ng,"gut_urgencia":nu,"gut_tendencia":nt,
-                    "gut_score":        ng*nu*nt,
-                    "observacoes":      novo_obs or None,
-                }).eq("id",t["id"]).execute()
-                limpar_cache()
-                st.success("✅ Salvo!"); st.rerun()
+                novo_obs = st.text_area("Obs.", value=t.get("observacoes") or "",
+                    key=f"obs_{t['id']}", height=50)
+
+                sv1, sv2 = st.columns([1,5])
+                if sv1.button("💾 Salvar", key=f"save_{t['id']}", type="primary"):
+                    supabase.table("obras_tarefas").update({
+                        "responsavel_id":   equipe_ids.get(r_nome),
+                        "aprovador_id":     equipe_ids.get(a_nome) if a_nome != "—" else None,
+                        "consultado_id":    equipe_ids.get(c_nome) if c_nome != "—" else None,
+                        "informado_id":     equipe_ids.get(i_nome) if i_nome != "—" else None,
+                        "status":           novo_status,
+                        "impedimento":      novo_imp or None,
+                        "avanco_percent":   novo_avanco,
+                        "inicio_previsto":  novo_inicio.isoformat()  if novo_inicio  else None,
+                        "entrega_prevista": novo_entrega.isoformat() if novo_entrega else None,
+                        "entrega_real":     novo_real.isoformat()    if novo_real    else None,
+                        "gut_gravidade":    ng,"gut_urgencia":nu,"gut_tendencia":nt,
+                        "gut_score":        ng*nu*nt,
+                        "observacoes":      novo_obs or None,
+                    }).eq("id",t["id"]).execute()
+                    st.session_state[edit_key] = False
+                    limpar_cache(); st.rerun()
+                if sv2.button("✕ Cancelar", key=f"cancel_{t['id']}"):
+                    st.session_state[edit_key] = False
+                    st.rerun()
