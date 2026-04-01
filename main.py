@@ -313,42 +313,55 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         # ── ROTAS 7, 8, 9: PRODUÇÃO ──────────────────────────
                         elif rota in ["7","8","9"]:
 
-                            # ── ROTA 7: renomear colunas por posição ──────────
-                            # Aceita o CSV original (Avanço_Físico_Fabricação.csv)
-                            # sem depender dos nomes acentuados do cabeçalho.
+                            # ── Renomear colunas por posição (imune a acentos) ─
                             if rota == "7":
-                                _nomes7 = [
+                                _nomes_prod = [
                                     "peca","codigo","obra_codigo","etapa","produto",
                                     "secao","qtde_pecas","volume_total","data_fabricacao",
                                     "volume_teorico","peso_aco","peso_aco_frouxo",
                                     "peso_aco_protendido","comprimento",
                                 ]
-                                _n = min(len(_nomes7), len(df.columns))
-                                df.columns = _nomes7[:_n] + list(df.columns[_n:])
+                            elif rota == "8":
+                                _nomes_prod = [
+                                    "peca","codigo","obra_codigo","etapa","produto",
+                                    "data_expedicao","volume_real","status","peso",
+                                    "numero_carga","transportadora","motorista","nota_fiscal",
+                                ]
+                            else:
+                                _nomes_prod = [
+                                    "peca","codigo","obra_codigo","etapa","produto",
+                                    "secao","qtde_pecas","volume_total","data_montagem",
+                                    "volume_teorico","peso",
+                                ]
+                            _np = min(len(_nomes_prod), len(df.columns))
+                            df.columns = _nomes_prod[:_np] + list(df.columns[_np:])
 
                             mob = mapa_obras()
-                            df["obra_id"] = aplicar_obra_id(df["obra_codigo"].apply(extrair_codigo), mob)
-                            ignorados = df["obra_id"].isna().sum()
-                            df = df.dropna(subset=["obra_id"])
+                            df["obra_id"] = aplicar_obra_id(
+                                df["obra_codigo"].apply(extrair_codigo), mob)
+                            sem_obra = int(df["obra_id"].isna().sum())
+                            # Preserva linhas sem obra (obra_id NULL) — não descarta
 
                             if rota == "7":
-                                tabela = "producao_fabricacao"
+                                tabela   = "producao_fabricacao"
                                 num_cols = ["qtde_pecas","volume_total","volume_teorico",
-                                            "peso_aco","peso_aco_frouxo","peso_aco_protendido","comprimento"]
+                                            "peso_aco","peso_aco_frouxo",
+                                            "peso_aco_protendido","comprimento"]
                                 date_col = "data_fabricacao"
                                 cols_bd  = ["obra_id","peca","codigo","etapa","produto","secao",
                                             "qtde_pecas","volume_total","data_fabricacao",
                                             "volume_teorico","peso_aco","peso_aco_frouxo",
                                             "peso_aco_protendido","comprimento"]
                             elif rota == "8":
-                                tabela = "producao_transporte"
+                                tabela   = "producao_transporte"
                                 num_cols = ["volume_real","peso","numero_carga"]
                                 date_col = "data_expedicao"
                                 cols_bd  = ["obra_id","peca","codigo","etapa","produto",
                                             "data_expedicao","volume_real","status","peso",
-                                            "numero_carga","transportadora","motorista","nota_fiscal"]
+                                            "numero_carga","transportadora","motorista",
+                                            "nota_fiscal"]
                             else:
-                                tabela = "producao_montagem"
+                                tabela   = "producao_montagem"
                                 num_cols = ["qtde_pecas","volume_total","volume_teorico","peso"]
                                 date_col = "data_montagem"
                                 cols_bd  = ["obra_id","peca","codigo","etapa","produto","secao",
@@ -364,7 +377,9 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             total = enviar_lotes(tabela, pacote, f"Enviando para {tabela}...",
                                                  on_conflict="obra_id,codigo")
                             st.success(f"🎉 {total} registros atualizados em {tabela}!")
-                            if ignorados: st.warning(f"⚠️ {ignorados} linha(s) ignorada(s): obra não encontrada.")
+                            com_obra = total - sem_obra
+                            st.info(f"✅ {com_obra} com obra vinculada"
+                                    + (f" | ⚠️ {sem_obra} sem obra (obra_id NULL)" if sem_obra else ""))
 
                         # ── ROTA 10: CUSTOS ──────────────────────────────────
                         # (mantido abaixo; rotas 11 e 12 adicionadas ao final)
@@ -950,8 +965,6 @@ def carregar_producao_resumo():
     df = pd.DataFrame(rows)
     if df.empty:
         return df
-    if "peca" in df.columns:
-        df = df.drop_duplicates(subset=["obra_id", "peca"])
     for col in ["volume_teorico","volume_total","peso_aco",
                 "peso_aco_frouxo","peso_aco_protendido","qtde_pecas"]:
         if col not in df.columns:
@@ -1990,9 +2003,6 @@ elif pagina_selecionada == "💰 Financeiro":
         if not rows: return {}
         df = pd.DataFrame(rows)
         df[col_vol] = pd.to_numeric(df[col_vol], errors="coerce").fillna(0)
-        # Manter apenas a primeira ocorrência de cada peça por obra
-        # — elimina duplicatas de reimportação sem remover peças distintas
-        df = df.drop_duplicates(subset=["obra_id", "peca"])
         return df.groupby("obra_id")[col_vol].sum().to_dict()
 
     @st.cache_data(ttl=300)
@@ -2480,9 +2490,6 @@ elif pagina_selecionada == "🏭 Produção":
 
         df = pd.DataFrame(rows)
         if df.empty: return df
-        # Elimina duplicatas de reimportação (mesma peça, mesma obra)
-        if "peca" in df.columns:
-            df = df.drop_duplicates(subset=["obra_id", "peca"])
         for col in ["volume_teorico", "volume_total", "peso_aco", "peso_aco_frouxo", "peso_aco_protendido"]:
             if col not in df.columns:
                 df[col] = 0.0
@@ -2535,9 +2542,6 @@ elif pagina_selecionada == "🏭 Produção":
             page += 1
         df = pd.DataFrame(rows)
         if df.empty: return df
-        # Elimina duplicatas de reimportação (mesma peça, mesma obra)
-        if "peca" in df.columns:
-            df = df.drop_duplicates(subset=["obra_id", "peca"])
         df["volume_total"] = pd.to_numeric(df["volume_total"], errors="coerce").fillna(0)
         df["mes"] = pd.to_datetime(df["data_montagem"], errors="coerce").dt.to_period("M").astype(str)
         return df
