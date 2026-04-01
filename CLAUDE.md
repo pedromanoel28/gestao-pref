@@ -9,8 +9,6 @@
 - **Repositório:** github.com/pedromanoel28/gestao-pref
 
 ## Credenciais Supabase
-- URL: https://crdskgqkkkzmgedsunat.supabase.co
-- Chave: sb_publishable_MTT7fwe8IefxrY6MO_gthw_nCo5QfWF
 
 ## Estrutura do Banco
 
