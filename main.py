@@ -1283,298 +1283,480 @@ elif pagina_selecionada == "💰 Financeiro":
     import plotly.graph_objects as go
     import plotly.express as px
 
-    # ── CARGA ──────────────────────────────────────────────
+    # ── FUNÇÕES DE CARGA ────────────────────────────────────
+
     @st.cache_data(ttl=300)
-    def carregar_custos():
-        rows, page, size = [], 0, 1000
-        while True:
-            resp = supabase.table("custos")\
-                .select("data, conta_macro, centro_custos, conta_gerencial, "
-                        "cli_fornecedor, valor_global")\
-                .range(page * size, (page + 1) * size - 1)\
-                .execute()
-            rows.extend(resp.data)
-            if len(resp.data) < size:
-                break
-            page += 1
-        df = pd.DataFrame(rows)
-        if df.empty:
-            return df
-        df["data"]         = pd.to_datetime(df["data"], errors="coerce")
-        df["valor_global"] = pd.to_numeric(df["valor_global"], errors="coerce").fillna(0)
-        df["mes"]          = df["data"].dt.to_period("M").astype(str)
+    def carregar_obras_financeiro():
+        resp = supabase.table("obras_financeiro")\
+            .select("*, obras(nome, status, modalidade, cliente)")\
+            .execute()
+        if not resp.data:
+            return pd.DataFrame()
+        df = pd.DataFrame(resp.data)
+        df["obra_nome"]   = df["obras"].apply(lambda x: (x or {}).get("nome"))
+        df["obra_status"] = df["obras"].apply(lambda x: (x or {}).get("status"))
+        df["modalidade"]  = df["obras"].apply(lambda x: (x or {}).get("modalidade"))
+        df["cliente"]     = df["obras"].apply(lambda x: (x or {}).get("cliente"))
+        df = df.drop(columns=["obras"])
+        for c in [
+            "volume", "volume_projeto", "faturamento_total", "faturamento_civil",
+            "faturamento_direto", "custo_total", "despesas_indiretas", "impostos",
+            "lucro", "concreto", "aco_estrutural", "formas", "mo_producao",
+            "eps", "estuque", "projetos", "descida_agua", "insertos", "consoles",
+            "investimentos", "neoprene", "materiais_consumo", "equip_fab",
+            "custos_indiretos", "pecas_consorcio", "frete", "equip_montagem",
+            "mo_montagem", "despesas_equipe", "topografia", "mobilizacao",
+            "equip_aux_montagem", "outros", "eventuais", "despesas_comerciais",
+            "cimento_cliente_ton", "cimento_civil_ton",
+        ]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
         return df
 
-    def fmt_brl(v):
-        if pd.isna(v) or v == 0:
+    @st.cache_data(ttl=300)
+    def carregar_medicoes():
+        rows, page, size = [], 0, 1000
+        q = (supabase.table("notas_fiscais")
+             .select("obra_id, data_acao, descricao, tipo, valor")
+             .not_.in_("tipo", ["NOTA FISCAL CANCELADA", "NOTA FISCAL REMESSA"]))
+        while True:
+            resp = q.range(page * size, (page + 1) * size - 1).execute()
+            rows.extend(resp.data)
+            if len(resp.data) < size: break
+            page += 1
+        df = pd.DataFrame(rows)
+        if df.empty: return df
+        df["valor"]     = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
+        df["data_acao"] = pd.to_datetime(df["data_acao"], errors="coerce")
+        df["mes"]       = df["data_acao"].dt.to_period("M").astype(str)
+        return df
+
+    @st.cache_data(ttl=300)
+    def carregar_medicoes_completas(obra_id):
+        rows, page, size = [], 0, 1000
+        q = (supabase.table("notas_fiscais")
+             .select("*")
+             .eq("obra_id", obra_id)
+             .not_.in_("tipo", ["NOTA FISCAL CANCELADA"])
+             .order("data_acao", desc=True))
+        while True:
+            resp = q.range(page * size, (page + 1) * size - 1).execute()
+            rows.extend(resp.data)
+            if len(resp.data) < size: break
+            page += 1
+        df = pd.DataFrame(rows)
+        if df.empty: return df
+        df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
+        return df
+
+    @st.cache_data(ttl=300)
+    def volume_fabricado_por_obra():
+        rows, page, size = [], 0, 1000
+        q = supabase.table("producao_fabricacao").select("obra_id, volume_teorico")
+        while True:
+            resp = q.range(page * size, (page + 1) * size - 1).execute()
+            rows.extend(resp.data)
+            if len(resp.data) < size: break
+            page += 1
+        if not rows: return {}
+        df = pd.DataFrame(rows)
+        df["volume_teorico"] = pd.to_numeric(df["volume_teorico"], errors="coerce").fillna(0)
+        return df.groupby("obra_id")["volume_teorico"].sum().to_dict()
+
+    # ── FUNÇÕES DE CÁLCULO ────────────────────────────────────
+
+    def calcular_custos_categorias(row):
+        def v(col): return float(row.get(col) or 0) if pd.notna(row.get(col)) else 0.0
+        return {
+            "custo_fabricacao": sum(v(c) for c in [
+                "concreto", "aco_estrutural", "formas", "mo_producao",
+                "materiais_consumo", "equip_fab", "custos_indiretos",
+                "eps", "estuque", "insertos", "consoles", "neoprene",
+                "descida_agua", "pecas_consorcio", "investimentos"]),
+            "custo_transporte": v("frete"),
+            "custo_montagem":   sum(v(c) for c in [
+                "mo_montagem", "equip_montagem", "equip_aux_montagem",
+                "despesas_equipe", "topografia", "mobilizacao"]),
+        }
+
+    def vol_ref_row(row):
+        """Retorna (volume, origem) de uma linha do DataFrame obras_financeiro."""
+        vp = row.get("volume_projeto")
+        vc = row.get("volume")
+        if vp is not None and not pd.isna(vp) and float(vp) > 0:
+            return float(vp), "projeto"
+        if vc is not None and not pd.isna(vc) and float(vc) > 0:
+            return float(vc), "comercial"
+        return None, None
+
+    def fmt_brl_fin(v):
+        if v is None or (isinstance(v, float) and pd.isna(v)) or v == 0:
             return "R$ 0"
         sinal = "-" if v < 0 else ""
-        return f"{sinal}R$ " + f"{abs(v):,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        return (f"{sinal}R$ "
+                + f"{abs(v):,.0f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
-    def curva_abc(df_in, col_grupo, col_valor):
-        """ABC por valor absoluto — funciona com despesas negativas ou positivas."""
-        g = df_in.groupby(col_grupo)[col_valor].sum().reset_index()
-        g.columns = ["nome", "valor"]
-        g["abs_v"] = g["valor"].abs()
-        g = g[g["abs_v"] > 0].copy().sort_values("abs_v", ascending=False).reset_index(drop=True)
-        total       = g["abs_v"].sum()
-        g["pct"]    = g["abs_v"] / total * 100
-        g["cum_pct"]= g["pct"].cumsum()
-        g["classe"] = g["cum_pct"].apply(
-            lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C"))
-        return g.drop(columns="abs_v")
+    def fmt_milhao(v):
+        if v is None or (isinstance(v, float) and pd.isna(v)) or v == 0:
+            return "R$ 0"
+        av, sinal = abs(v), ("-" if v < 0 else "")
+        if av >= 1_000_000:
+            return f"{sinal}R$ {av/1_000_000:.1f}M".replace(".", ",")
+        if av >= 1_000:
+            return f"{sinal}R$ {av/1_000:.0f}k".replace(".", ",")
+        return fmt_brl_fin(v)
 
-    CORES_ABC = {"A": "#EF5350", "B": "#FFA726", "C": "#66BB6A"}
+    # ── CARREGA DADOS ─────────────────────────────────────────
+    st.header("💰 Financeiro")
 
-    def plot_abc(df_abc, key):
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=df_abc["nome"], y=df_abc["valor"],
-            marker_color=[CORES_ABC[c] for c in df_abc["classe"]],
-            name="Valor",
-            hovertemplate="%{x}<br>R$ %{y:,.0f}<extra></extra>"))
-        fig.add_trace(go.Scatter(
-            x=df_abc["nome"], y=df_abc["cum_pct"],
-            yaxis="y2", mode="lines+markers", name="Acumulado %",
-            line=dict(color="#1A237E", width=2),
-            hovertemplate="%{y:.1f}%<extra></extra>"))
-        fig.update_layout(
-            yaxis=dict(tickformat=",.0f", tickprefix="R$ "),
-            yaxis2=dict(overlaying="y", side="right",
-                        range=[0, 105], ticksuffix="%", showgrid=False),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-            margin=dict(t=50, b=70), height=360,
-            xaxis=dict(tickangle=-40))
-        st.plotly_chart(fig, use_container_width=True, key=key)
+    with st.spinner("Carregando dados financeiros..."):
+        df_of  = carregar_obras_financeiro()
+        df_med = carregar_medicoes()
 
-    def tbl_abc(df_abc, col_nome):
-        tbl = df_abc.copy()
-        tbl["Valor"] = tbl["valor"].apply(fmt_brl)
-        tbl["%"]     = tbl["pct"].apply(lambda x: f"{x:.1f}%")
-        tbl["Acum."] = tbl["cum_pct"].apply(lambda x: f"{x:.1f}%")
-        st.dataframe(
-            tbl[["classe","nome","Valor","%","Acum."]].rename(
-                columns={"classe":"Classe","nome":col_nome}),
-            use_container_width=True, hide_index=True, height=230)
-
-    # ── CARREGA ────────────────────────────────────────────
-    df_custos = carregar_custos()
-    st.header("💰 Dashboard de Custos")
-
-    if df_custos.empty:
-        st.warning("Nenhum dado encontrado. Importe os arquivos na seção Importador.")
+    if df_of.empty:
+        st.warning("Nenhum dado em obras_financeiro. "
+                   "Importe a rota 12 na seção Importador.")
         st.stop()
 
-    # Listas globais de opções
-    meses_disp = sorted(df_custos["mes"].dropna().unique(), reverse=True)
-    categorias = sorted(df_custos["conta_macro"].fillna("—").unique())
-    centros    = sorted(df_custos["centro_custos"].fillna("—").unique())
+    hdr1, hdr2 = st.columns([6, 1])
+    if hdr2.button("🔄 Atualizar", key="btn_fin_refresh"):
+        carregar_obras_financeiro.clear()
+        carregar_medicoes.clear()
+        carregar_medicoes_completas.clear()
+        volume_fabricado_por_obra.clear()
+        st.rerun()
 
-    # Índice dos meses para navegação
-    meses_ord = sorted(df_custos["mes"].dropna().unique())
+    tab_cart, tab_obra = st.tabs(["📊 Carteira", "🏗️ Obra"])
 
-    # ── FILTRO GLOBAL: Mês ──────────────────────────────────
-    fh1, fh2 = st.columns([4, 1])
-    sel_mes = fh1.selectbox("Mês de referência", meses_disp, index=0, key="fin_mes")
-    if fh2.button("🔄 Atualizar", key="btn_fin_refresh"):
-        carregar_custos.clear(); st.rerun()
+    # ══════════════════════════════════════════════════════════
+    # ABA 1 — CARTEIRA
+    # ══════════════════════════════════════════════════════════
+    with tab_cart:
+        fc1, fc2, _ = st.columns([2, 2, 3])
+        sel_periodo_c = fc1.selectbox(
+            "Período", ["Ativas", "Histórico", "Todas"], key="cart_periodo")
+        mods_disp = ["Todas"] + sorted(
+            m for m in df_of["modalidade"].dropna().unique() if m)
+        sel_modal = fc2.selectbox("Modalidade", mods_disp, key="cart_modal")
 
-    idx_atual = meses_ord.index(sel_mes) if sel_mes in meses_ord else len(meses_ord) - 1
-    mes_atual = meses_ord[idx_atual]
-    mes_ant   = meses_ord[idx_atual - 1] if idx_atual > 0 else None
+        df_cart = df_of.copy()
+        if sel_periodo_c == "Ativas":
+            df_cart = df_cart[df_cart["obra_status"] == "Em Andamento"]
+        elif sel_periodo_c == "Histórico":
+            df_cart = df_cart[df_cart["obra_status"].isin(["Concluída", "Cancelada"])]
+        if sel_modal != "Todas":
+            df_cart = df_cart[df_cart["modalidade"] == sel_modal]
 
-    df_mes     = df_custos[df_custos["mes"] == mes_atual]
-    df_mes_ant = df_custos[df_custos["mes"] == mes_ant] if mes_ant else pd.DataFrame()
+        if df_cart.empty:
+            st.info("Nenhuma obra para o filtro selecionado.")
+        else:
+            ids_cart   = set(df_cart["obra_id"].dropna().astype(int))
+            df_med_c   = (df_med[df_med["obra_id"].isin(ids_cart)].copy()
+                          if not df_med.empty else pd.DataFrame())
+            fat_total  = df_cart["faturamento_total"].fillna(0).sum()
+            faturado_c = df_med_c["valor"].sum() if not df_med_c.empty else 0.0
+            saldo_c    = fat_total - faturado_c
+            pct_c      = faturado_c / fat_total if fat_total > 0 else 0.0
 
-    # ── NÍVEL 1: MÉTRICAS (dados completos do mês) ─────────
-    total_atual = df_mes["valor_global"].sum()
-    total_ant   = df_mes_ant["valor_global"].sum() if not df_mes_ant.empty else 0
-    var_pct     = (total_atual - total_ant) / abs(total_ant) * 100 if total_ant else 0
+            # Métricas
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("💼 Carteira total", fmt_milhao(fat_total))
+            m2.metric("✅ Faturado",        fmt_milhao(faturado_c))
+            m3.metric("⏳ Saldo",           fmt_milhao(saldo_c))
+            m4.metric("🏗️ Obras",           str(len(df_cart)))
+            st.progress(min(pct_c, 1.0))
+            st.caption(f"{pct_c*100:.1f}% faturado da carteira total")
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("💰 Total do mês",  fmt_brl(total_atual))
-    m2.metric("📅 Mês anterior",  fmt_brl(total_ant))
-    delta_txt = f"{var_pct:+.1f}%"
-    m3.metric("📈 Variação",      delta_txt, delta=delta_txt, delta_color="inverse")
-    m4.metric("📄 Lançamentos",   f"{len(df_mes):,}".replace(",", "."))
+            st.divider()
 
-    st.divider()
+            # Situação por obra — barras horizontais empilhadas
+            st.markdown("#### 📊 Situação por obra")
+            med_por_obra = (df_med_c.groupby("obra_id")["valor"].sum()
+                            if not df_med_c.empty else pd.Series(dtype=float))
 
-    # ── NÍVEL 2: EVOLUÇÃO + COMPARATIVO ───────────────────
-    st.markdown("#### 📅 Evolução temporal")
-    e2a, e2b, e2c = st.columns([3, 3, 1])
-    ev_cat    = e2a.multiselect("Categorias", categorias, key="ev_cat",
-                                 placeholder="Todas as categorias")
-    ev_centro = e2b.multiselect("Centro de custo", centros, key="ev_centro",
-                                 placeholder="Todos os centros")
-    ev_meses  = e2c.number_input("Meses", 3, 24, 12, key="ev_meses", step=1)
+            rows_bar = []
+            for _, r in df_cart.iterrows():
+                oid  = r.get("obra_id")
+                fat  = float(r.get("faturamento_total") or 0)
+                fatd = float(med_por_obra.get(oid, 0))
+                pct  = fatd / fat * 100 if fat > 0 else 0.0
+                rows_bar.append({
+                    "obra":    r.get("obra_nome") or f"ID {oid}",
+                    "faturado": fatd,
+                    "saldo":    max(0.0, fat - fatd),
+                    "fat_total": fat,
+                    "pct":      pct,
+                })
+            df_bar = (pd.DataFrame(rows_bar)
+                      .sort_values("saldo", ascending=False)
+                      .reset_index(drop=True))
 
-    ev_cat_f    = ev_cat    if ev_cat    else categorias
-    ev_centro_f = ev_centro if ev_centro else centros
-    df_ev = df_custos[
-        df_custos["conta_macro"].isin(ev_cat_f) &
-        df_custos["centro_custos"].isin(ev_centro_f)
-    ]
-    meses_ev = sorted(df_ev["mes"].dropna().unique())
-    df_12    = df_ev[df_ev["mes"].isin(meses_ev[-int(ev_meses):])]
+            def _cor(pct):
+                return "#10b981" if pct >= 80 else ("#f59e0b" if pct >= 50 else "#ef4444")
 
-    l2a, l2b = st.columns(2)
-    with l2a:
-        st.subheader("Evolução empilhada")
-        df_evol = df_12.groupby(["mes","conta_macro"])["valor_global"].sum().reset_index()
-        fig_evol = px.bar(df_evol, x="mes", y="valor_global", color="conta_macro",
-                          barmode="stack",
-                          labels={"mes":"","valor_global":"R$","conta_macro":""},
-                          color_discrete_sequence=px.colors.qualitative.Set2)
-        fig_evol.update_layout(
-            yaxis_tickformat=",.0f", yaxis_tickprefix="R$ ",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-            margin=dict(t=50, b=20), height=340)
-        fig_evol.update_traces(
-            hovertemplate="%{x}<br>%{fullData.name}<br>R$ %{y:,.0f}<extra></extra>")
-        st.plotly_chart(fig_evol, use_container_width=True, key="chart_evol")
+            fig_bar = go.Figure()
+            fig_bar.add_trace(go.Bar(
+                y=df_bar["obra"], x=df_bar["faturado"],
+                orientation="h", name="Faturado",
+                marker_color=[_cor(p) for p in df_bar["pct"]],
+                customdata=df_bar[["saldo", "pct", "fat_total"]].values,
+                hovertemplate=(
+                    "<b>%{y}</b><br>"
+                    "Faturado: R$ %{x:,.0f}<br>"
+                    "Saldo: R$ %{customdata[0]:,.0f}<br>"
+                    "%{customdata[1]:.1f}% de R$ %{customdata[2]:,.0f}"
+                    "<extra></extra>")))
+            fig_bar.add_trace(go.Bar(
+                y=df_bar["obra"], x=df_bar["saldo"],
+                orientation="h", name="Saldo",
+                marker_color="rgba(200,200,200,0.35)",
+                hoverinfo="skip"))
+            fig_bar.update_layout(
+                barmode="stack",
+                xaxis=dict(title="R$", tickformat=",.0f"),
+                yaxis=dict(autorange="reversed"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                margin=dict(t=40, b=20, l=10, r=10),
+                height=min(600, 40 * len(df_bar) + 80))
+            st.plotly_chart(fig_bar, use_container_width=True, key="chart_cart_bar")
+            st.caption("🟢 ≥ 80% faturado   🟡 50–80%   🔴 < 50%")
 
-    with l2b:
-        st.subheader(f"{mes_atual} vs {mes_ant or '—'}")
-        comp_a = df_ev[df_ev["mes"] == mes_atual].groupby("conta_macro")["valor_global"].sum().rename("atual")
-        comp_b = (df_ev[df_ev["mes"] == mes_ant].groupby("conta_macro")["valor_global"].sum().rename("anterior")
-                  if mes_ant else pd.Series(name="anterior", dtype=float))
-        df_comp = (pd.concat([comp_a, comp_b], axis=1)
-                   .fillna(0).reset_index()
-                   .melt("conta_macro", var_name="período", value_name="valor"))
-        if mes_ant and not df_comp.empty:
-            fig_comp = px.bar(df_comp, x="conta_macro", y="valor", color="período",
-                              barmode="group",
-                              labels={"conta_macro":"","valor":"R$","período":""},
-                              color_discrete_map={"atual":"#1976D2","anterior":"#90CAF9"})
-            fig_comp.update_layout(
+            st.divider()
+
+            # Evolução mensal do faturamento (barras + acumulado)
+            st.markdown("#### 📅 Evolução mensal do faturamento")
+            if not df_med_c.empty:
+                ev_men = (df_med_c.groupby("mes")["valor"].sum()
+                          .reset_index().sort_values("mes"))
+                ev_men["acumulado"] = ev_men["valor"].cumsum()
+                fig_ev_c = go.Figure()
+                fig_ev_c.add_trace(go.Bar(
+                    x=ev_men["mes"], y=ev_men["valor"],
+                    name="Mensal", marker_color="#1976D2",
+                    hovertemplate="<b>%{x}</b><br>R$ %{y:,.0f}<extra></extra>"))
+                fig_ev_c.add_trace(go.Scatter(
+                    x=ev_men["mes"], y=ev_men["acumulado"],
+                    name="Acumulado", yaxis="y2",
+                    mode="lines+markers",
+                    line=dict(color="#E53935", width=2),
+                    hovertemplate="Acum.: R$ %{y:,.0f}<extra></extra>"))
+                fig_ev_c.update_layout(
+                    yaxis=dict(title="R$ Mensal", tickformat=",.0f"),
+                    yaxis2=dict(title="Acumulado", overlaying="y", side="right",
+                                tickformat=",.0f", showgrid=False),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                    margin=dict(t=50, b=20), height=320)
+                st.plotly_chart(fig_ev_c, use_container_width=True, key="chart_cart_ev")
+            else:
+                st.info("Sem medições para o período filtrado.")
+
+            st.divider()
+
+            # Distribuição por modalidade
+            st.markdown("#### 🥧 Distribuição por modalidade")
+            df_mod_p = df_cart[df_cart["modalidade"].notna()].copy()
+            if df_mod_p.empty:
+                st.info("Modalidade não definida nas obras.")
+            else:
+                mod_grp = (df_mod_p.groupby("modalidade")["faturamento_total"]
+                           .sum().fillna(0).reset_index())
+                mod_grp = mod_grp[mod_grp["faturamento_total"] > 0]
+                if mod_grp.empty:
+                    st.info("Modalidade não definida nas obras.")
+                else:
+                    fig_mod = px.pie(
+                        mod_grp, names="modalidade", values="faturamento_total",
+                        hole=0.4,
+                        color_discrete_sequence=px.colors.qualitative.Set2)
+                    fig_mod.update_traces(
+                        textinfo="label+percent",
+                        hovertemplate="%{label}<br>R$ %{value:,.0f}<br>%{percent}<extra></extra>")
+                    fig_mod.update_layout(
+                        showlegend=False,
+                        margin=dict(t=20, b=20, l=20, r=20), height=320)
+                    st.plotly_chart(fig_mod, use_container_width=True, key="chart_modal")
+
+    # ══════════════════════════════════════════════════════════
+    # ABA 2 — OBRA
+    # ══════════════════════════════════════════════════════════
+    with tab_obra:
+        ob1, ob2 = st.columns(2)
+        sel_ob_per = ob1.selectbox("Período", ["Ativas", "Todas"], key="obra_periodo")
+
+        df_ob_disp = df_of.copy()
+        if sel_ob_per == "Ativas":
+            df_ob_disp = df_ob_disp[df_ob_disp["obra_status"] == "Em Andamento"]
+        df_ob_disp = df_ob_disp.sort_values("obra_nome")
+
+        if df_ob_disp.empty:
+            st.info("Nenhuma obra disponível.")
+            st.stop()
+
+        obras_map_fin = {}
+        for _, r in df_ob_disp.iterrows():
+            cod   = str(r.get("codigo_produto") or "").strip()
+            nome  = str(r.get("obra_nome") or "?")
+            label = f"{cod} — {nome}" if cod else nome
+            obras_map_fin[label] = r
+
+        sel_obra_label = ob2.selectbox("Obra", list(obras_map_fin.keys()),
+                                        key="sel_obra_fin")
+        row_obra  = obras_map_fin[sel_obra_label]
+        obra_id_f = row_obra.get("obra_id")
+
+        fat_total_o = float(row_obra.get("faturamento_total") or 0)
+        lucro_o     = row_obra.get("lucro")
+
+        df_med_o  = (df_med[df_med["obra_id"] == obra_id_f].copy()
+                     if not df_med.empty else pd.DataFrame())
+        faturado_o = float(df_med_o["valor"].sum()) if not df_med_o.empty else 0.0
+        saldo_o    = fat_total_o - faturado_o
+        pct_fin_o  = faturado_o / fat_total_o if fat_total_o > 0 else 0.0
+
+        # Painel financeiro
+        pa1, pa2, pa3, pa4 = st.columns(4)
+        pa1.metric("📋 Contratado",     fmt_brl_fin(fat_total_o))
+        pa2.metric("✅ Faturado",        fmt_brl_fin(faturado_o))
+        pa3.metric("⏳ Saldo",           fmt_brl_fin(saldo_o))
+        try:
+            lucro_val = float(lucro_o) if lucro_o is not None else None
+            lucro_str = fmt_brl_fin(lucro_val) if lucro_val is not None and not pd.isna(lucro_val) else "—"
+        except Exception:
+            lucro_str = "—"
+        pa4.metric("📈 Margem prevista", lucro_str)
+        st.progress(min(pct_fin_o, 1.0))
+        st.caption(f"{pct_fin_o*100:.1f}% faturado")
+
+        st.divider()
+
+        # Avanço físico vs financeiro
+        st.markdown("#### 📐 Avanço físico vs financeiro")
+        vref, vref_origem = vol_ref_row(row_obra)
+        vol_fab_map = volume_fabricado_por_obra()
+        vol_fab_o   = float(vol_fab_map.get(obra_id_f, 0))
+
+        av1, av2 = st.columns(2)
+        with av1:
+            st.markdown("**Físico (fabricação)**")
+            if vref and vref > 0:
+                pct_fis = min(vol_fab_o / vref, 1.0)
+                st.progress(pct_fis)
+                st.caption(
+                    f"{vol_fab_o:,.1f} m³ fab. / {vref:,.1f} m³ ref. ({vref_origem})"
+                    f" — {pct_fis*100:.1f}%".replace(",", "."))
+            else:
+                pct_fis = 0.0
+                st.info("Volume de referência não disponível para esta obra.")
+
+        with av2:
+            st.markdown("**Financeiro (faturamento)**")
+            st.progress(min(pct_fin_o, 1.0))
+            st.caption(
+                f"{fmt_brl_fin(faturado_o)} / {fmt_brl_fin(fat_total_o)}"
+                f" — {pct_fin_o*100:.1f}%")
+
+        # Gap físico vs financeiro
+        if vref and vref > 0 and fat_total_o > 0:
+            diff = pct_fis * 100 - pct_fin_o * 100
+            valor_a_fat = (pct_fis - pct_fin_o) * fat_total_o
+            if abs(diff) < 5:
+                st.success(f"✅ Avanços alinhados ({diff:+.1f}%)")
+            elif diff > 0:
+                st.info(
+                    f"📐 Físico à frente do financeiro em {diff:.1f}%"
+                    f" — {fmt_brl_fin(valor_a_fat)} a faturar")
+            else:
+                st.warning(f"💰 Financeiro à frente do físico em {abs(diff):.1f}%")
+
+        st.divider()
+
+        # Evolução mensal da obra por descrição
+        st.markdown("#### 📅 Faturamento mensal por tipo")
+        if not df_med_o.empty and "mes" in df_med_o.columns:
+            ev_obra = (df_med_o.groupby(["mes", "descricao"])["valor"]
+                       .sum().reset_index())
+            fig_ev_o = px.bar(
+                ev_obra, x="mes", y="valor", color="descricao",
+                barmode="stack",
+                labels={"mes": "", "valor": "R$", "descricao": "Tipo"},
+                color_discrete_sequence=px.colors.qualitative.Set2)
+            fig_ev_o.update_layout(
                 yaxis_tickformat=",.0f", yaxis_tickprefix="R$ ",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-                margin=dict(t=50, b=20), height=340, xaxis_tickangle=-25)
-            fig_comp.update_traces(hovertemplate="%{x}<br>R$ %{y:,.0f}<extra></extra>")
-            st.plotly_chart(fig_comp, use_container_width=True, key="chart_comp")
+                margin=dict(t=50, b=20), height=280)
+            fig_ev_o.update_traces(
+                hovertemplate="%{x}<br>%{fullData.name}<br>R$ %{y:,.0f}<extra></extra>")
+            st.plotly_chart(fig_ev_o, use_container_width=True, key="chart_ev_obra")
         else:
-            st.info("Sem mês anterior para comparar.")
+            st.info("Sem medições para esta obra.")
 
-    st.divider()
+        st.divider()
 
-    # ── NÍVEL 3: ABC CONTA GERENCIAL + ROSCA ──────────────
-    st.markdown("#### 🔍 Concentração de custos")
-    a3a, a3b, a3c = st.columns([3, 3, 1])
-    abc_cat    = a3a.multiselect("Categorias", categorias, key="abc_cat",
-                                  placeholder="Todas as categorias")
-    abc_centro = a3b.multiselect("Centro de custo", centros, key="abc_centro",
-                                  placeholder="Todos os centros")
-    abc_top_n  = a3c.number_input("Top N contas", 5, 100, 20, key="abc_topn", step=5)
+        # Breakdown de custo previsto
+        st.markdown("#### 💰 Breakdown de custo previsto")
+        custos_cat = calcular_custos_categorias(row_obra)
+        cf = custos_cat["custo_fabricacao"]
+        ct = custos_cat["custo_transporte"]
+        cm = custos_cat["custo_montagem"]
+        custo_total_cat = cf + ct + cm
 
-    abc_cat_f    = abc_cat    if abc_cat    else categorias
-    abc_centro_f = abc_centro if abc_centro else centros
-    df_abc_base  = df_mes[
-        df_mes["conta_macro"].isin(abc_cat_f) &
-        df_mes["centro_custos"].isin(abc_centro_f)
-    ]
+        bc1, bc2 = st.columns(2)
+        with bc1:
+            if custo_total_cat > 0:
+                _nomes  = ["Fabricação", "Transporte", "Montagem"]
+                _vals   = [cf, ct, cm]
+                _cores  = ["#1976D2", "#FB8C00", "#43A047"]
+                _filt_n = [n for n, v in zip(_nomes, _vals) if v > 0]
+                _filt_v = [v for v in _vals if v > 0]
+                _filt_c = [c for c, v in zip(_cores, _vals) if v > 0]
+                fig_bc  = px.pie(
+                    names=_filt_n, values=_filt_v,
+                    hole=0.4, color_discrete_sequence=_filt_c)
+                fig_bc.update_traces(
+                    textinfo="label+percent",
+                    hovertemplate="%{label}<br>R$ %{value:,.0f}<br>%{percent}<extra></extra>")
+                fig_bc.update_layout(
+                    showlegend=False,
+                    margin=dict(t=20, b=20, l=10, r=10), height=300)
+                st.plotly_chart(fig_bc, use_container_width=True, key="chart_bc_pie")
+            else:
+                st.info("Breakdown não disponível para esta obra.")
 
-    l3a, l3b = st.columns(2)
-    with l3a:
-        st.subheader("Curva ABC — Conta Gerencial")
-        abc_cg = curva_abc(df_abc_base, "conta_gerencial", "valor_global").head(int(abc_top_n))
-        if not abc_cg.empty:
-            plot_abc(abc_cg, key="chart_abc_cg")
-            tbl_abc(abc_cg, "Conta Gerencial")
+        with bc2:
+            if custo_total_cat > 0:
+                for nome_cat, val_cat in [("Fabricação", cf),
+                                           ("Transporte", ct),
+                                           ("Montagem",   cm)]:
+                    pct_cat = val_cat / custo_total_cat * 100 if custo_total_cat else 0
+                    st.metric(nome_cat, fmt_brl_fin(val_cat),
+                              delta=f"{pct_cat:.1f}% do custo total",
+                              delta_color="off")
+
+        st.divider()
+
+        # Tabela de NFs
+        st.markdown("#### 📄 Notas fiscais / medições")
+        with st.spinner("Carregando NFs..."):
+            df_nfs = carregar_medicoes_completas(obra_id_f)
+
+        if df_nfs.empty:
+            st.info("Nenhuma NF para esta obra.")
         else:
-            st.info("Sem dados para o filtro selecionado.")
-
-    with l3b:
-        st.subheader("Distribuição por Categoria")
-        df_cat = df_abc_base.groupby("conta_macro")["valor_global"].sum().reset_index()
-        df_cat["abs_v"] = df_cat["valor_global"].abs()
-        df_cat = df_cat[df_cat["abs_v"] > 0]
-        if not df_cat.empty:
-            fig_pie = go.Figure(go.Pie(
-                labels=df_cat["conta_macro"],
-                values=df_cat["abs_v"],
-                hole=0.42,
-                textinfo="label+percent",
-                textposition="outside",
-                hovertemplate="%{label}<br>R$ %{value:,.0f}<br>%{percent}<extra></extra>",
-                marker=dict(colors=px.colors.qualitative.Set2)))
-            fig_pie.update_layout(
-                showlegend=False, margin=dict(t=30, b=30, l=30, r=30), height=450)
-            st.plotly_chart(fig_pie, use_container_width=True, key="chart_pie")
-        else:
-            st.info("Sem dados para o filtro selecionado.")
-
-    st.divider()
-
-    # ── NÍVEL 4: TOP N FORNECEDORES + ABC ─────────────────
-    st.markdown("#### 🏭 Análise de fornecedores")
-    f4a, f4b, f4c = st.columns([3, 3, 1])
-    forn_cat    = f4a.multiselect("Categorias", categorias, key="forn_cat",
-                                   placeholder="Todas as categorias")
-    forn_centro = f4b.multiselect("Centro de custo", centros, key="forn_centro",
-                                   placeholder="Todos os centros")
-    forn_top_n  = f4c.number_input("Top N", 5, 100, 15, key="forn_topn", step=5)
-
-    forn_cat_f    = forn_cat    if forn_cat    else categorias
-    forn_centro_f = forn_centro if forn_centro else centros
-    df_forn_base  = df_mes[
-        df_mes["conta_macro"].isin(forn_cat_f) &
-        df_mes["centro_custos"].isin(forn_centro_f)
-    ]
-
-    l4a, l4b = st.columns(2)
-    with l4a:
-        st.subheader(f"Top {int(forn_top_n)} Fornecedores")
-        # ascending=True → mais negativo (maior custo) aparece primeiro
-        df_forn = (df_forn_base.groupby("cli_fornecedor")["valor_global"]
-                   .sum()
-                   .sort_values(ascending=True)
-                   .head(int(forn_top_n))
-                   .reset_index())
-        df_forn.columns = ["fornecedor", "valor"]
-        if not df_forn.empty:
-            fig_forn = go.Figure(go.Bar(
-                x=df_forn["valor"],
-                y=df_forn["fornecedor"],
-                orientation="h",
-                marker_color="#42A5F5",
-                text=df_forn["valor"].apply(fmt_brl),
-                textposition="outside",
-                hovertemplate="%{y}<br>R$ %{x:,.0f}<extra></extra>"))
-            fig_forn.update_layout(
-                xaxis=dict(tickformat=",.0f", tickprefix="R$ "),
-                yaxis=dict(autorange="reversed"),
-                margin=dict(t=20, b=10, r=200),
-                height=max(300, int(forn_top_n) * 30))
-            st.plotly_chart(fig_forn, use_container_width=True, key="chart_forn")
-
-    with l4b:
-        st.subheader("Curva ABC — Fornecedores")
-        abc_forn = curva_abc(df_forn_base, "cli_fornecedor", "valor_global")
-        if not abc_forn.empty:
-            # Esconde labels do eixo X (muitos fornecedores) mas mantém hover
-            fig_abc_f = go.Figure()
-            fig_abc_f.add_trace(go.Bar(
-                x=abc_forn["nome"], y=abc_forn["valor"],
-                marker_color=[CORES_ABC[c] for c in abc_forn["classe"]],
-                name="Valor",
-                hovertemplate="%{x}<br>R$ %{y:,.0f}<extra></extra>"))
-            fig_abc_f.add_trace(go.Scatter(
-                x=abc_forn["nome"], y=abc_forn["cum_pct"],
-                yaxis="y2", mode="lines+markers", name="Acumulado %",
-                line=dict(color="#1A237E", width=2),
-                hovertemplate="%{y:.1f}%<extra></extra>"))
-            fig_abc_f.update_layout(
-                yaxis=dict(tickformat=",.0f", tickprefix="R$ "),
-                yaxis2=dict(overlaying="y", side="right",
-                            range=[0, 105], ticksuffix="%", showgrid=False),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-                margin=dict(t=50, b=20), height=360,
-                xaxis=dict(showticklabels=False))
-            st.plotly_chart(fig_abc_f, use_container_width=True, key="chart_abc_forn")
-            tbl_abc(abc_forn, "Fornecedor")
-        else:
-            st.info("Sem dados para o filtro selecionado.")
+            cols_nf = [c for c in ["data_acao", "numero_nf", "descricao", "tipo", "valor"]
+                       if c in df_nfs.columns]
+            df_nf_show = df_nfs[cols_nf].copy()
+            df_nf_show["valor_fmt"] = df_nf_show["valor"].apply(fmt_brl_fin)
+            st.dataframe(
+                df_nf_show.drop(columns=["valor"]).rename(columns={
+                    "data_acao":  "Data",
+                    "numero_nf":  "NF",
+                    "descricao":  "Descrição",
+                    "tipo":       "Tipo",
+                    "valor_fmt":  "Valor",
+                }),
+                use_container_width=True, hide_index=True,
+                height=min(500, 36 + 35 * len(df_nf_show)))
+            st.caption(f"Total: {fmt_brl_fin(df_nf_show['valor'].sum())}")
 
 # ==========================================================
 # PÁGINA: PRODUÇÃO — DASHBOARD OPERACIONAL
