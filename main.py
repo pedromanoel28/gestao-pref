@@ -441,12 +441,14 @@ if pagina_selecionada == "📥 Importador de Arquivos":
 
                         # ── ROTA 12: RESUMO FINANCEIRO OBRAS ─────────────────
                         # Fonte: Civil_Comercial_Estruturas_Custos_Obras.csv
+                        # Lógica: sync obras + upsert obras_financeiro (sem duplicatas)
                         elif rota == "12":
+                            import math as _m12
                             arquivo.seek(0)
                             df12 = pd.read_csv(arquivo, sep=None, engine="python",
                                                encoding="utf-8-sig", dtype=str, header=0)
 
-                            # Renomear por posição
+                            # Renomear por posição (imune a acentos/encoding)
                             nomes12 = [
                                 "data_contrato", "codigo_produto", "obra_nome",
                                 "volume", "faturamento_total", "faturamento_civil",
@@ -467,24 +469,11 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                                 for i in range(min(len(df12.columns), len(nomes12)))
                             })
 
-                            # Converter data
-                            df12["data_contrato"] = formatar_data(df12["data_contrato"])
-
-                            # Limpar todos os campos numéricos
                             texto12 = {"data_contrato", "codigo_produto", "obra_nome",
                                        "chave_coligada", "razao_social", "cnpj",
                                        "responsavel", "email"}
-                            for c in [col for col in nomes12
-                                      if col not in texto12 and col in df12.columns]:
-                                df12[c] = formatar_numero(df12[c])
-
-                            # obra_id via código 4 dígitos em obra_nome (pode ser NULL)
-                            mob = mapa_obras()
-                            df12["obra_id"] = aplicar_obra_id(
-                                df12["obra_nome"].apply(extrair_codigo), mob)
-                            sem_obra12 = int(df12["obra_id"].isna().sum())
-
-                            # Somente colunas que existem no schema obras_financeiro
+                            cols_num12 = [c for c in nomes12
+                                          if c not in texto12 and c in df12.columns]
                             cols_bd12 = [
                                 "obra_id", "data_contrato", "codigo_produto", "obra_nome",
                                 "chave_coligada", "razao_social", "cnpj", "responsavel",
@@ -500,16 +489,101 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                                 "outros", "eventuais", "despesas_comerciais",
                                 "cimento_cliente_ton", "cimento_civil_ton",
                             ]
-                            cols_bd12 = [c for c in cols_bd12 if c in df12.columns]
-                            pacote12 = df12[cols_bd12].to_dict("records")
-                            pacote12 = fix_ids(pacote12)
-                            pacote12 = limpar_nan_pacote(pacote12)  # ← purga NaN residuais
-                            supabase.table("obras_financeiro").insert(pacote12).execute()
+
+                            def limpar_num(val):
+                                """Limpa valor numérico individual → float ou None."""
+                                if val is None or str(val).strip() in ("", "nan", "NaN"):
+                                    return None
+                                try:
+                                    limpo = (str(val).replace("R$","").replace(" ","")
+                                             .replace(".","").replace(",",".").strip())
+                                    r = float(limpo)
+                                    return None if (_m12.isnan(r) or _m12.isinf(r)) else r
+                                except Exception:
+                                    return None
+
+                            def limpar_str(val):
+                                """Limpa string — retorna None se vazio/NaN."""
+                                if val is None or str(val).strip().lower() in (
+                                        "", "nan", "nat", "none"):
+                                    return None
+                                return str(val).strip()
+
+                            criadas = inseridas = atualizadas = sem_codigo = 0
+                            barra12 = st.progress(0, text="Processando obras...")
+                            total12 = len(df12)
+
+                            for idx, row in df12.iterrows():
+                                barra12.progress((idx + 1) / total12,
+                                                 text=f"{idx + 1}/{total12} linhas")
+
+                                # ── PASSO 1: código da obra ───────────────────
+                                cod4 = extrair_codigo(row.get("obra_nome", ""))
+                                if not cod4:
+                                    sem_codigo += 1
+                                    continue
+
+                                obra_nome_val = limpar_str(row.get("obra_nome"))
+
+                                # ── PASSO 2: sincronizar tabela obras ─────────
+                                resp_obra = (supabase.table("obras")
+                                             .select("id, codigo, nome")
+                                             .eq("codigo", cod4)
+                                             .execute())
+                                if not resp_obra.data:
+                                    ins_obra = supabase.table("obras").insert({
+                                        "codigo": cod4,
+                                        "nome":   obra_nome_val,
+                                        "status": "Em Andamento",
+                                    }).execute()
+                                    obra_id = int(ins_obra.data[0]["id"])
+                                    criadas += 1
+                                else:
+                                    obra_id = int(resp_obra.data[0]["id"])
+                                    supabase.table("obras").update(
+                                        {"nome": obra_nome_val}
+                                    ).eq("id", obra_id).execute()
+
+                                # ── PASSO 3: montar payload obras_financeiro ──
+                                payload12 = {"obra_id": obra_id}
+                                payload12["data_contrato"] = formatar_data_valor(
+                                    row.get("data_contrato"))
+                                for campo in ["codigo_produto", "obra_nome", "chave_coligada",
+                                              "razao_social", "cnpj", "responsavel", "email"]:
+                                    if campo in df12.columns:
+                                        payload12[campo] = limpar_str(row.get(campo))
+                                for campo in cols_num12:
+                                    if campo in df12.columns:
+                                        payload12[campo] = limpar_num(row.get(campo))
+
+                                # Garantir apenas colunas do schema
+                                payload12 = {k: v for k, v in payload12.items()
+                                             if k in cols_bd12}
+
+                                # ── PASSO 3: upsert obras_financeiro ──────────
+                                resp_fin = (supabase.table("obras_financeiro")
+                                            .select("obra_id")
+                                            .eq("obra_id", obra_id)
+                                            .execute())
+                                if not resp_fin.data:
+                                    supabase.table("obras_financeiro").insert(
+                                        payload12).execute()
+                                    inseridas += 1
+                                else:
+                                    supabase.table("obras_financeiro").update(
+                                        payload12).eq("obra_id", obra_id).execute()
+                                    atualizadas += 1
+
+                            limpar_cache()
                             st.success(
-                                f"🎉 {len(pacote12)} registros importados em obras_financeiro!")
+                                f"🎉 {inseridas + atualizadas} registros processados")
                             st.info(
-                                f"✅ {len(pacote12) - sem_obra12} com obra vinculada  "
-                                f"| ⚠️ {sem_obra12} sem obra")
+                                f"✅ {criadas} obras novas criadas  "
+                                f"| {inseridas} obras_financeiro inseridas  "
+                                f"| {atualizadas} atualizadas")
+                            if sem_codigo:
+                                st.warning(
+                                    f"⚠️ {sem_codigo} linha(s) sem código válido ignorada(s)")
 
                     except Exception as e:
                         st.error(f"❌ Erro no banco: {e}")
@@ -688,6 +762,57 @@ def limpar_cache():
     carregar_ultimo_update.clear()
     carregar_tarefas_colab.clear()
 
+# ── PAINEL LATERAL — EDIÇÃO RÁPIDA DE OBRA ──────────────
+_SB_STATUS   = ["Em Andamento", "Concluída", "Cancelada", "Proposta"]
+_SB_MODALS   = ["FOB", "CIF", "Montagem", "Não definida"]
+_SB_ST_ICON  = {"Em Andamento": "🔵", "Concluída": "🟢", "Cancelada": "🔴", "Proposta": "🟡"}
+
+with st.sidebar.expander("✏️ Editar obra", expanded=False):
+    _obras_sb  = carregar_obras_ativas()
+    _equipe_sb = carregar_equipe_ativa()
+
+    if not _obras_sb:
+        st.caption("Nenhuma obra cadastrada.")
+    else:
+        _opc_sb   = {f"{o['codigo']} — {o['nome']}": o for o in _obras_sb}
+        _sb_lbl   = st.selectbox("Obra", list(_opc_sb.keys()),
+                                 key="sb_obra_sel", label_visibility="collapsed")
+        _osb      = _opc_sb[_sb_lbl]
+        _oid_sb   = _osb["id"]
+
+        _cur_st   = _osb.get("status") or "Em Andamento"
+        st.caption(f"{_SB_ST_ICON.get(_cur_st,'⚪')} Status atual: **{_cur_st}**")
+
+        _idx_s    = _SB_STATUS.index(_cur_st) if _cur_st in _SB_STATUS else 0
+        _new_st   = st.selectbox("Status", _SB_STATUS, index=_idx_s, key="sb_ed_status")
+
+        _cur_m    = _osb.get("modalidade") or "Não definida"
+        _idx_m    = _SB_MODALS.index(_cur_m) if _cur_m in _SB_MODALS else 3
+        _new_m    = st.selectbox("Modalidade", _SB_MODALS, index=_idx_m, key="sb_ed_modal")
+
+        _new_cli  = st.text_input("Cliente", value=_osb.get("cliente") or "", key="sb_ed_cliente")
+
+        _rnomes_sb  = [e["nome"] for e in _equipe_sb]
+        _rids_sb    = {e["nome"]: e["id"] for e in _equipe_sb}
+        _resp_opt   = ["—"] + _rnomes_sb
+        _cur_rid    = _osb.get("responsavel_id")
+        _cur_rnm    = next((e["nome"] for e in _equipe_sb if e["id"] == _cur_rid), None)
+        _idx_r      = _resp_opt.index(_cur_rnm) if _cur_rnm in _resp_opt else 0
+        _new_resp   = st.selectbox("Responsável", _resp_opt, index=_idx_r, key="sb_ed_resp")
+
+        if st.button("💾 Salvar", key="btn_sb_salvar_obra", use_container_width=True):
+            _novo_rid = _rids_sb.get(_new_resp) if _new_resp != "—" else None
+            supabase.table("obras").update({
+                "status":         _new_st,
+                "modalidade":     _new_m,
+                "cliente":        _new_cli.strip() or None,
+                "responsavel_id": int(_novo_rid) if _novo_rid else None,
+            }).eq("id", _oid_sb).execute()
+            limpar_cache()
+            st.success("✅ Salvo!")
+            st.rerun()
+# ────────────────────────────────────────────────────────
+
 @st.cache_data(ttl=60)
 def volume_referencia(obra_id):
     """Retorna o volume de referência da obra para uso financeiro.
@@ -765,50 +890,6 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
 
     if r3.button("🔄 Atualizar"):
         limpar_cache(); st.rerun()
-
-    # ── EDITAR DADOS DA OBRA ──────────────────────────────
-    obra_atual = next((o for o in obras if o["id"] == obra_id), {})
-
-    STATUS_OBRA  = ["Em Andamento", "Concluída", "Cancelada", "Proposta"]
-    MODALIDADES  = ["FOB", "CIF", "Montagem", "Não definida"]
-
-    with st.expander("⚙️ Editar dados da obra", expanded=False):
-        ea1, ea2, ea3, ea4 = st.columns(4)
-
-        cur_status = obra_atual.get("status") or "Em Andamento"
-        idx_status = STATUS_OBRA.index(cur_status) if cur_status in STATUS_OBRA else 0
-        ed_status = ea1.selectbox("Status da obra", STATUS_OBRA,
-                                   index=idx_status, key="ed_obra_status")
-
-        cur_modal = obra_atual.get("modalidade") or "Não definida"
-        idx_modal = MODALIDADES.index(cur_modal) if cur_modal in MODALIDADES else 3
-        ed_modal = ea2.selectbox("Modalidade", MODALIDADES,
-                                  index=idx_modal, key="ed_obra_modal")
-
-        ed_cliente = ea3.text_input("Cliente", value=obra_atual.get("cliente") or "",
-                                     key="ed_obra_cliente")
-
-        # Responsável — lista da equipe com opção vazia
-        resp_opcoes = ["—"] + equipe_nomes
-        cur_resp_id = obra_atual.get("responsavel_id")
-        cur_resp_nome = next((e["nome"] for e in equipe_lista
-                              if e["id"] == cur_resp_id), None)
-        idx_resp = resp_opcoes.index(cur_resp_nome) if cur_resp_nome in resp_opcoes else 0
-        ed_resp = ea4.selectbox("Responsável", resp_opcoes,
-                                 index=idx_resp, key="ed_obra_resp")
-
-        if st.button("💾 Salvar dados da obra", key="btn_salvar_obra"):
-            novo_resp_id = equipe_ids.get(ed_resp) if ed_resp != "—" else None
-            payload = {
-                "status":         ed_status,
-                "modalidade":     ed_modal,
-                "cliente":        ed_cliente.strip() or None,
-                "responsavel_id": int(novo_resp_id) if novo_resp_id else None,
-            }
-            supabase.table("obras").update(payload).eq("id", obra_id).execute()
-            limpar_cache()
-            st.success("✅ Dados da obra atualizados!")
-            st.rerun()
 
     # ── CARREGA E PREPARA DADOS ───────────────────────────
     tarefas = carregar_tarefas(obra_id)
@@ -1850,13 +1931,16 @@ elif pagina_selecionada == "🏭 Produção":
             return rows
 
         try:
-            rows = _query("obra_id, produto, etapa, volume_total, peso_aco,"
+            rows = _query("obra_id, peca, produto, etapa, volume_total, peso_aco,"
                           " peso_aco_frouxo, peso_aco_protendido, data_fabricacao")
         except Exception:
-            rows = _query("obra_id, produto, etapa, volume_total, peso_aco, data_fabricacao")
+            rows = _query("obra_id, peca, produto, etapa, volume_total, peso_aco, data_fabricacao")
 
         df = pd.DataFrame(rows)
         if df.empty: return df
+        # Elimina duplicatas de reimportação (mesma peça, mesma obra)
+        if "peca" in df.columns:
+            df = df.drop_duplicates(subset=["obra_id", "peca"])
         for col in ["volume_total", "peso_aco", "peso_aco_frouxo", "peso_aco_protendido"]:
             if col not in df.columns:
                 df[col] = 0.0
@@ -1899,7 +1983,7 @@ elif pagina_selecionada == "🏭 Produção":
     def carregar_montagem_prod(inicio, fim):
         rows, page, size = [], 0, 1000
         q = (supabase.table("producao_montagem")
-             .select("obra_id, produto, etapa, volume_total, data_montagem"))
+             .select("obra_id, peca, produto, etapa, volume_total, data_montagem"))
         if inicio: q = q.gte("data_montagem", inicio)
         if fim:    q = q.lte("data_montagem", fim)
         while True:
@@ -1909,6 +1993,9 @@ elif pagina_selecionada == "🏭 Produção":
             page += 1
         df = pd.DataFrame(rows)
         if df.empty: return df
+        # Elimina duplicatas de reimportação (mesma peça, mesma obra)
+        if "peca" in df.columns:
+            df = df.drop_duplicates(subset=["obra_id", "peca"])
         df["volume_total"] = pd.to_numeric(df["volume_total"], errors="coerce").fillna(0)
         df["mes"] = pd.to_datetime(df["data_montagem"], errors="coerce").dt.to_period("M").astype(str)
         return df
