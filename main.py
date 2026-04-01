@@ -1315,10 +1315,10 @@ elif pagina_selecionada == "💰 Financeiro":
 
     @st.cache_data(ttl=300)
     def carregar_medicoes():
+        # Filtragem de tipo feita em Python — not_.in_ combinado com range()
+        # causa APIError em certas versões do supabase-py
         rows, page, size = [], 0, 1000
-        q = (supabase.table("notas_fiscais")
-             .select("obra_id, data_acao, descricao, tipo, valor")
-             .not_.in_("tipo", ["NOTA FISCAL CANCELADA", "NOTA FISCAL REMESSA"]))
+        q = supabase.table("notas_fiscais").select("obra_id, data_acao, descricao, tipo, valor")
         while True:
             resp = q.range(page * size, (page + 1) * size - 1).execute()
             rows.extend(resp.data)
@@ -1326,6 +1326,8 @@ elif pagina_selecionada == "💰 Financeiro":
             page += 1
         df = pd.DataFrame(rows)
         if df.empty: return df
+        excluir = {"NOTA FISCAL CANCELADA", "NOTA FISCAL REMESSA"}
+        df = df[~df["tipo"].str.strip().str.upper().isin(excluir)].copy()
         df["valor"]     = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
         df["data_acao"] = pd.to_datetime(df["data_acao"], errors="coerce")
         df["mes"]       = df["data_acao"].dt.to_period("M").astype(str)
@@ -1333,12 +1335,12 @@ elif pagina_selecionada == "💰 Financeiro":
 
     @st.cache_data(ttl=300)
     def carregar_medicoes_completas(obra_id):
+        # Seleciona colunas explícitas (sem *) e filtra tipo em Python
+        cols = ("id, obra_id, data_acao, numero_nf, numero_nf_remessa, "
+                "descricao, tipo, valor, nome_pagador, cnpj_recebedor, "
+                "razao_social_recebedor, etapa_obra, categoria, observacoes")
         rows, page, size = [], 0, 1000
-        q = (supabase.table("notas_fiscais")
-             .select("*")
-             .eq("obra_id", obra_id)
-             .not_.in_("tipo", ["NOTA FISCAL CANCELADA"])
-             .order("data_acao", desc=True))
+        q = supabase.table("notas_fiscais").select(cols).eq("obra_id", obra_id)
         while True:
             resp = q.range(page * size, (page + 1) * size - 1).execute()
             rows.extend(resp.data)
@@ -1346,7 +1348,10 @@ elif pagina_selecionada == "💰 Financeiro":
             page += 1
         df = pd.DataFrame(rows)
         if df.empty: return df
-        df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
+        df = df[df["tipo"].str.strip().str.upper() != "NOTA FISCAL CANCELADA"].copy()
+        df["valor"]     = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
+        df["data_acao"] = pd.to_datetime(df["data_acao"], errors="coerce")
+        df = df.sort_values("data_acao", ascending=False).reset_index(drop=True)
         return df
 
     @st.cache_data(ttl=300)
