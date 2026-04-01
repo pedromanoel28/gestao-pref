@@ -1370,8 +1370,14 @@ elif pagina_selecionada == "🏭 Produção":
     @st.cache_data(ttl=600)
     def carregar_fabricacao(inicio, fim):
         rows, page, size = [], 0, 1000
-        q = (supabase.table("producao_fabricacao")
-             .select("obra_id, produto, etapa, volume_total, peso_aco, data_fabricacao"))
+        try:
+            cols = ("obra_id, produto, etapa, volume_total, peso_aco,"
+                    " peso_aco_frouxo, peso_aco_cord_viga, peso_aco_cord_laje,"
+                    " data_fabricacao")
+            q = supabase.table("producao_fabricacao").select(cols)
+        except Exception:
+            cols = "obra_id, produto, etapa, volume_total, peso_aco, data_fabricacao"
+            q = supabase.table("producao_fabricacao").select(cols)
         if inicio: q = q.gte("data_fabricacao", inicio)
         if fim:    q = q.lte("data_fabricacao", fim)
         while True:
@@ -1381,8 +1387,11 @@ elif pagina_selecionada == "🏭 Produção":
             page += 1
         df = pd.DataFrame(rows)
         if df.empty: return df
-        df["volume_total"] = pd.to_numeric(df["volume_total"], errors="coerce").fillna(0)
-        df["peso_aco"]     = pd.to_numeric(df["peso_aco"],     errors="coerce").fillna(0)
+        for col in ["volume_total", "peso_aco", "peso_aco_frouxo",
+                    "peso_aco_cord_viga", "peso_aco_cord_laje"]:
+            if col not in df.columns:
+                df[col] = 0.0
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
         df["mes"] = pd.to_datetime(df["data_fabricacao"], errors="coerce").dt.to_period("M").astype(str)
         return df
 
@@ -1542,21 +1551,67 @@ elif pagina_selecionada == "🏭 Produção":
         gap_pat = max(0.0, vol_fab - vol_exp)
         gap_can = max(0.0, vol_exp - vol_mon)
 
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("🏗️ Fabricado",    fmt_m3(vol_fab))
-        m2.metric("🚚 Expedido",     fmt_m3(vol_exp),
-                  delta=f"{vol_exp/vol_fab*100:.0f}% fab" if vol_fab else None,
-                  delta_color="off")
-        m3.metric("🔧 Montado",      fmt_m3(vol_mon),
-                  delta=f"{vol_mon/vol_exp*100:.0f}% exp" if vol_exp else None,
-                  delta_color="off")
-        m4.metric("📦 Gap Pátio",    fmt_m3(gap_pat),
-                  help="Fabricado mas ainda não expedido — estoque no pátio")
-        m5.metric("🏗️ Gap Canteiro", fmt_m3(gap_can),
-                  help="Expedido mas ainda não montado — peças aguardando montagem")
+        # ── Bloco A — Funil de fluxo físico ────────────────
+        st.markdown("#### 🔄 Funil de fluxo físico")
+
+        def _cor_gap(pct_gap):
+            """pct_gap = gap / volume_referência * 100"""
+            if pct_gap >= 30: return "#E53935"
+            if pct_gap >= 15: return "#FB8C00"
+            return "#43A047"
+
+        pct_gap_pat = (gap_pat / vol_fab * 100) if vol_fab else 0
+        pct_gap_can = (gap_can / vol_exp * 100) if vol_exp else 0
+        pct_exp     = (vol_exp / vol_fab * 100)  if vol_fab else 0
+        pct_mon     = (vol_mon / vol_exp * 100)  if vol_exp else 0
+
+        cor_gap_pat = _cor_gap(pct_gap_pat)
+        cor_gap_can = _cor_gap(pct_gap_can)
+
+        fu1, fu_a1, fu2, fu_a2, fu3 = st.columns([3, 1, 3, 1, 3])
+        with fu1:
+            st.markdown(
+                f"""<div style="background:#1976D2;border-radius:10px;padding:18px 10px;
+                text-align:center;color:white">
+                <div style="font-size:1.7rem;font-weight:700">{fmt_m3(vol_fab)}</div>
+                <div style="font-size:0.95rem;opacity:.85">🏭 FABRICADO</div>
+                <div style="font-size:0.8rem;opacity:.7;margin-top:4px">100%</div>
+                </div>""", unsafe_allow_html=True)
+        with fu_a1:
+            st.markdown(
+                f"""<div style="text-align:center;padding-top:22px">
+                <div style="font-size:1.4rem">→</div>
+                <div style="font-size:0.75rem;color:{cor_gap_pat};font-weight:600;margin-top:4px">
+                ▼ {fmt_m3(gap_pat)}<br>no pátio</div>
+                </div>""", unsafe_allow_html=True)
+        with fu2:
+            st.markdown(
+                f"""<div style="background:#43A047;border-radius:10px;padding:18px 10px;
+                text-align:center;color:white">
+                <div style="font-size:1.7rem;font-weight:700">{fmt_m3(vol_exp)}</div>
+                <div style="font-size:0.95rem;opacity:.85">🚛 EXPEDIDO</div>
+                <div style="font-size:0.8rem;opacity:.7;margin-top:4px">{pct_exp:.1f}% do fab.</div>
+                </div>""", unsafe_allow_html=True)
+        with fu_a2:
+            st.markdown(
+                f"""<div style="text-align:center;padding-top:22px">
+                <div style="font-size:1.4rem">→</div>
+                <div style="font-size:0.75rem;color:{cor_gap_can};font-weight:600;margin-top:4px">
+                ▼ {fmt_m3(gap_can)}<br>no canteiro</div>
+                </div>""", unsafe_allow_html=True)
+        with fu3:
+            st.markdown(
+                f"""<div style="background:#E53935;border-radius:10px;padding:18px 10px;
+                text-align:center;color:white">
+                <div style="font-size:1.7rem;font-weight:700">{fmt_m3(vol_mon)}</div>
+                <div style="font-size:0.95rem;opacity:.85">🏗️ MONTADO</div>
+                <div style="font-size:0.8rem;opacity:.7;margin-top:4px">{pct_mon:.1f}% do exp.</div>
+                </div>""", unsafe_allow_html=True)
 
         st.divider()
-        st.markdown("#### 📈 Ritmo mensal (m³)")
+
+        # ── Bloco B — Evolução mensal (áreas sobrepostas) ──
+        st.markdown("#### 📈 Evolução mensal (m³)")
         ev1, ev2 = st.columns([5, 1])
         ev_n = ev2.number_input("Meses", 3, 84, min(n_meses or 24, 24),
                                  key="ev_prod_n", step=1)
@@ -1584,22 +1639,30 @@ elif pagina_selecionada == "🏭 Produção":
         df_ev = df_ev.fillna(0)
 
         fig_ev = go.Figure()
-        for label, cor in [("Fabricação","#1976D2"),("Expedição","#43A047"),("Montagem","#E53935")]:
+        series_ev = [
+            ("Fabricação", "#1976D2", "rgba(25,118,210,0.15)"),
+            ("Expedição",  "#43A047", "rgba(67,160,71,0.15)"),
+            ("Montagem",   "#E53935", "rgba(229,57,53,0.15)"),
+        ]
+        for label, cor, fill_cor in series_ev:
             if label in df_ev.columns:
                 fig_ev.add_trace(go.Scatter(
                     x=df_ev["mes"], y=df_ev[label],
                     mode="lines+markers", name=label,
-                    line=dict(color=cor, width=2),
+                    line=dict(color=cor, width=2.5),
+                    fill="tozeroy", fillcolor=fill_cor,
                     hovertemplate=f"<b>{label}</b>: %{{y:,.1f}} m³<extra></extra>"))
         fig_ev.update_layout(
             yaxis=dict(title="m³", tickformat=",.0f"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-            margin=dict(t=50, b=20), height=340, hovermode="x unified")
+            margin=dict(t=50, b=20), height=360, hovermode="x unified")
         with ev1:
             st.plotly_chart(fig_ev, use_container_width=True, key="chart_prod_ev")
 
         st.divider()
-        st.markdown("#### 🏗️ Volume por obra")
+
+        # ── Bloco C — Situação por obra ────────────────────
+        st.markdown("#### 🏗️ Situação por obra")
 
         fab_obra = (df_fab_f.groupby("obra_id")["volume_total"].sum()
                     if not df_fab_f.empty else pd.Series(dtype=float))
@@ -1615,41 +1678,47 @@ elif pagina_selecionada == "🏭 Produção":
             fab = fab_obra.get(oid, 0)
             exp = tra_obra.get(oid, 0)
             mon = mon_obra.get(oid, 0)
+            gap = max(0.0, fab - exp)
+            if   gap > 500: farol = "🔴"
+            elif gap > 200: farol = "🟡"
+            else:           farol = "🟢"
             rows_obra.append({
                 "Obra":       obras_map.get(oid, f"ID {oid}"),
                 "Fab. m³":    round(fab, 1),
-                "Exp. m³":    round(exp, 1),
-                "Mont. m³":   round(mon, 1),
                 "% Expedido": min(round(exp / fab * 100, 1) if fab else 0, 100.0),
                 "% Montado":  min(round(mon / fab * 100, 1) if fab else 0, 100.0),
+                "Pátio m³":   round(gap, 1),
+                "Pátio":      f"{farol} {gap:,.0f} m³".replace(",", "."),
             })
 
         df_obra = pd.DataFrame(rows_obra).sort_values("Fab. m³", ascending=False)
         if not df_obra.empty:
             st.dataframe(
-                df_obra,
+                df_obra[["Obra", "Fab. m³", "% Expedido", "% Montado", "Pátio"]],
                 use_container_width=True, hide_index=True,
                 height=min(500, 36 + 35 * len(df_obra)),
                 column_config={
                     "Obra":       st.column_config.TextColumn("Obra", width="large"),
-                    "Fab. m³":    st.column_config.NumberColumn("Fabricado m³",  format="%.1f"),
-                    "Exp. m³":    st.column_config.NumberColumn("Expedido m³",   format="%.1f"),
-                    "Mont. m³":   st.column_config.NumberColumn("Montado m³",    format="%.1f"),
+                    "Fab. m³":    st.column_config.NumberColumn("Fabricado m³", format="%.1f"),
                     "% Expedido": st.column_config.ProgressColumn("% Expedido",
                                       min_value=0, max_value=100, format="%.1f%%"),
                     "% Montado":  st.column_config.ProgressColumn("% Montado",
                                       min_value=0, max_value=100, format="%.1f%%"),
+                    "Pátio":      st.column_config.TextColumn("Pátio (gap)"),
                 })
+        st.caption("🔴 > 500 m³ no pátio   🟡 200–500 m³   🟢 < 200 m³")
 
         st.divider()
+
+        # ── Bloco D — Composição da produção ───────────────
         st.markdown("#### 🔍 Composição da produção")
         l4a, l4b = st.columns(2)
 
         with l4a:
-            st.subheader("Top produtos fabricados (m³)")
+            st.subheader("Top 10 produtos fabricados (m³)")
             if not df_fab_f.empty:
                 top_prod = (df_fab_f.groupby("produto")["volume_total"]
-                            .sum().sort_values(ascending=True).tail(20).reset_index())
+                            .sum().sort_values(ascending=True).tail(10).reset_index())
                 top_prod.columns = ["produto", "volume"]
                 top_prod = top_prod[top_prod["volume"] > 0]
                 if not top_prod.empty:
@@ -1666,7 +1735,7 @@ elif pagina_selecionada == "🏭 Produção":
                 st.info("Sem dados de fabricação.")
 
         with l4b:
-            st.subheader("Volume por etapa (fabricação)")
+            st.subheader("Volume por etapa construtiva")
             if not df_fab_f.empty:
                 etapa_vol = (df_fab_f.groupby("etapa")["volume_total"]
                              .sum().sort_values(ascending=False).reset_index())
@@ -1737,19 +1806,25 @@ elif pagina_selecionada == "🏭 Produção":
                 ult = df_ef_valid.iloc[-1]
                 ant = df_ef_valid.iloc[-2] if len(df_ef_valid) > 1 else None
 
-                c1, c2, c3, c4 = st.columns(4)
+                custo_ult = ult["custo"]
+                c1, c2, c3, c4, c5 = st.columns(5)
                 c1.metric("R$/m³ atual",
                           f"R$ {ult['rpm3']:,.0f}".replace(",", "."))
                 if ant is not None:
                     c2.metric("R$/m³ mês anterior",
                               f"R$ {ant['rpm3']:,.0f}".replace(",", "."))
                     delta_pct = (ult["rpm3"] - ant["rpm3"]) / ant["rpm3"] * 100
-                    c3.metric("Variação", f"{delta_pct:+.1f}%",
+                    c3.metric("Variação vs anterior", f"{delta_pct:+.1f}%",
                               delta_color="inverse")
                 else:
                     c2.metric("R$/m³ mês anterior", "—")
-                    c3.metric("Variação", "—")
-                c4.metric("Volume (mês atual)", fmt_m3(ult["volume"]))
+                    c3.metric("Variação vs anterior", "—")
+                media_hist_pct = ((ult["rpm3"] - media_rpm3) / media_rpm3 * 100
+                                  if media_rpm3 else 0)
+                c4.metric("Δ vs média histórica", f"{media_hist_pct:+.1f}%",
+                          delta_color="inverse",
+                          help=f"Média histórica: R$ {media_rpm3:,.0f}".replace(",", "."))
+                c5.metric("Volume mês atual", fmt_m3(ult["volume"]))
 
                 st.divider()
 
@@ -1896,9 +1971,21 @@ elif pagina_selecionada == "🏭 Produção":
     # ABA 3 — INSUMOS
     # ════════════════════════════════════════════════════════
     with tab3:
-        aco_total     = df_fab_f["peso_aco"].sum()    if not df_fab_f.empty else 0
         vol_total_fab = df_fab_f["volume_total"].sum() if not df_fab_f.empty else 0
-        kgm3          = aco_total / vol_total_fab if vol_total_fab > 0 else 0
+
+        # Totais por tipo de aço
+        if not df_fab_f.empty:
+            aco_frouxo    = df_fab_f["peso_aco_frouxo"].sum()
+            aco_cord_viga = df_fab_f["peso_aco_cord_viga"].sum()
+            aco_cord_laje = df_fab_f["peso_aco_cord_laje"].sum()
+            aco_total     = df_fab_f["peso_aco"].sum()
+            # Se colunas separadas não existem (zeros), usa o total
+            tem_breakdown = (aco_frouxo + aco_cord_viga + aco_cord_laje) > 0
+        else:
+            aco_frouxo = aco_cord_viga = aco_cord_laje = aco_total = 0
+            tem_breakdown = False
+
+        kgm3 = aco_total / vol_total_fab if vol_total_fab > 0 else 0
 
         with st.spinner("Carregando dados do pátio..."):
             df_patio = carregar_patio(inicio_str, fim_str)
@@ -1908,53 +1995,213 @@ elif pagina_selecionada == "🏭 Produção":
 
         prazo_medio = df_patio["dias_patio"].mean() if not df_patio.empty else None
 
-        i1, i2, i3 = st.columns(3)
-        i1.metric("⚙️ Aço total consumido",
-                  f"{aco_total:,.0f} kg".replace(",", "."))
-        i2.metric("📐 kg aço / m³", f"{kgm3:.2f} kg/m³")
-        i3.metric("⏱️ Prazo médio pátio",
-                  f"{prazo_medio:.1f} dias" if prazo_medio is not None else "—")
+        # ── Bloco A — 4 métricas de aço ────────────────────
+        st.markdown("#### ⚙️ Consumo de aço")
+        if tem_breakdown:
+            pct_frouxo    = aco_frouxo    / aco_total * 100 if aco_total else 0
+            pct_cord_viga = aco_cord_viga / aco_total * 100 if aco_total else 0
+            pct_cord_laje = aco_cord_laje / aco_total * 100 if aco_total else 0
+            i1, i2, i3, i4 = st.columns(4)
+            i1.metric("⚙️ Frouxo total",
+                      f"{aco_frouxo:,.0f} kg".replace(",", "."),
+                      delta=f"{pct_frouxo:.0f}% do total", delta_color="off")
+            i2.metric("🔗 Cord. Viga",
+                      f"{aco_cord_viga:,.0f} kg".replace(",", "."),
+                      delta=f"{pct_cord_viga:.0f}% do total", delta_color="off")
+            i3.metric("🔗 Cord. Laje",
+                      f"{aco_cord_laje:,.0f} kg".replace(",", "."),
+                      delta=f"{pct_cord_laje:.0f}% do total", delta_color="off")
+            i4.metric("📐 kg aço / m³", f"{kgm3:.2f} kg/m³")
+        else:
+            i1, i2, i3 = st.columns(3)
+            i1.metric("⚙️ Aço total consumido",
+                      f"{aco_total:,.0f} kg".replace(",", "."))
+            i2.metric("📐 kg aço / m³", f"{kgm3:.2f} kg/m³")
+            i3.metric("⏱️ Prazo médio pátio",
+                      f"{prazo_medio:.1f} dias" if prazo_medio is not None else "—")
 
         st.divider()
 
-        # ── Aço/m³ ao longo do tempo ───────────────────────
-        st.markdown("#### 🔩 Aço por m³ ao longo do tempo")
+        # ── Bloco B — Evolução mensal dos tipos de aço ─────
+        st.markdown("#### 📈 Evolução mensal do consumo de aço")
         if not df_fab_f.empty and "mes" in df_fab_f.columns:
-            aco_mes = (df_fab_f.groupby("mes")
-                       .agg(aco=("peso_aco", "sum"), vol=("volume_total", "sum"))
-                       .reset_index())
-            aco_mes = aco_mes[aco_mes["vol"] > 0].copy()
-            aco_mes["kgm3"] = aco_mes["aco"] / aco_mes["vol"]
-            aco_mes = aco_mes.sort_values("mes")
-            media_kgm3 = aco_mes["kgm3"].mean()
-
-            fig_aco = go.Figure()
-            fig_aco.add_trace(go.Scatter(
-                x=aco_mes["mes"], y=[media_kgm3] * len(aco_mes),
-                mode="lines", name=f"Média {media_kgm3:.2f} kg/m³",
-                line=dict(color="#1976D2", width=1, dash="dash"),
-                hoverinfo="skip"))
-            fig_aco.add_trace(go.Scatter(
-                x=aco_mes["mes"], y=aco_mes["kgm3"],
-                mode="lines+markers", name="kg aço/m³",
-                line=dict(color="#E53935", width=2),
-                marker=dict(size=7),
-                hovertemplate="<b>%{x}</b><br>%{y:.2f} kg/m³<extra></extra>"))
-            fig_aco.update_layout(
-                yaxis=dict(title="kg/m³"),
+            if tem_breakdown:
+                aco_mes = (df_fab_f.groupby("mes")
+                           .agg(frouxo=("peso_aco_frouxo", "sum"),
+                                cord_viga=("peso_aco_cord_viga", "sum"),
+                                cord_laje=("peso_aco_cord_laje", "sum"))
+                           .reset_index().sort_values("mes"))
+                fig_aco_ev = go.Figure()
+                for col, nome, cor in [
+                    ("frouxo",    "Frouxo",         "#1976D2"),
+                    ("cord_viga", "Cord. Viga",     "#FB8C00"),
+                    ("cord_laje", "Cord. Laje",     "#43A047"),
+                ]:
+                    fig_aco_ev.add_trace(go.Scatter(
+                        x=aco_mes["mes"], y=aco_mes[col],
+                        mode="lines+markers", name=nome,
+                        line=dict(color=cor, width=2),
+                        hovertemplate=f"<b>{nome}</b>: %{{y:,.0f}} kg<extra></extra>"))
+            else:
+                aco_mes = (df_fab_f.groupby("mes")["peso_aco"].sum()
+                           .reset_index().rename(columns={"peso_aco": "total"})
+                           .sort_values("mes"))
+                fig_aco_ev = go.Figure()
+                fig_aco_ev.add_trace(go.Scatter(
+                    x=aco_mes["mes"], y=aco_mes["total"],
+                    mode="lines+markers", name="Aço total",
+                    line=dict(color="#E53935", width=2),
+                    hovertemplate="<b>%{x}</b>: %{y:,.0f} kg<extra></extra>"))
+            fig_aco_ev.update_layout(
+                yaxis=dict(title="kg", tickformat=",.0f"),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
                 margin=dict(t=50, b=20), height=320, hovermode="x unified")
-            st.plotly_chart(fig_aco, use_container_width=True, key="chart_kgm3")
+            st.plotly_chart(fig_aco_ev, use_container_width=True, key="chart_aco_ev")
         else:
-            st.info("Sem dados de peso de aço no período.")
+            st.info("Sem dados de aço no período.")
 
         st.divider()
 
-        # ── Prazo por obra + Histograma ─────────────────────
+        # ── Bloco C — Benchmark kg/m³ por produto ──────────
+        st.markdown("#### 📊 Benchmark kg aço/m³ por produto")
+        if not df_fab_f.empty:
+            # Carregar todos os dados históricos (sem filtro temporal) para média
+            @st.cache_data(ttl=600)
+            def carregar_fabricacao_historico():
+                rows, page, size = [], 0, 1000
+                try:
+                    cols = ("obra_id, produto, volume_total, peso_aco,"
+                            " peso_aco_frouxo, peso_aco_cord_viga, peso_aco_cord_laje")
+                    q = supabase.table("producao_fabricacao").select(cols)
+                except Exception:
+                    q = supabase.table("producao_fabricacao").select(
+                        "obra_id, produto, volume_total, peso_aco")
+                while True:
+                    resp = q.range(page * size, (page + 1) * size - 1).execute()
+                    rows.extend(resp.data)
+                    if len(resp.data) < size: break
+                    page += 1
+                df = pd.DataFrame(rows)
+                if df.empty: return df
+                for col in ["volume_total", "peso_aco", "peso_aco_frouxo",
+                            "peso_aco_cord_viga", "peso_aco_cord_laje"]:
+                    if col not in df.columns: df[col] = 0.0
+                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+                return df
+
+            df_hist = carregar_fabricacao_historico()
+
+            # Média histórica kg/m³ por produto
+            if not df_hist.empty:
+                ref_prod = (df_hist[df_hist["volume_total"] > 0]
+                            .groupby("produto")
+                            .agg(aco_h=("peso_aco", "sum"), vol_h=("volume_total", "sum"))
+                            .reset_index())
+                ref_prod["ref_kgm3"] = ref_prod["aco_h"] / ref_prod["vol_h"]
+            else:
+                ref_prod = pd.DataFrame(columns=["produto", "ref_kgm3"])
+
+            bench = (df_fab_f[df_fab_f["volume_total"] > 0]
+                     .groupby("produto")
+                     .agg(frouxo=("peso_aco_frouxo", "sum"),
+                          cord_viga=("peso_aco_cord_viga", "sum"),
+                          cord_laje=("peso_aco_cord_laje", "sum"),
+                          aco=("peso_aco", "sum"),
+                          vol=("volume_total", "sum"))
+                     .reset_index())
+            bench["frouxo_m3"]   = bench["frouxo"]   / bench["vol"]
+            bench["cord_v_m3"]   = bench["cord_viga"] / bench["vol"]
+            bench["cord_l_m3"]   = bench["cord_laje"] / bench["vol"]
+            bench["total_kgm3"]  = bench["aco"] / bench["vol"]
+            bench = bench.merge(ref_prod[["produto", "ref_kgm3"]], on="produto", how="left")
+            bench["vs_ref"] = bench.apply(
+                lambda r: f"{(r['total_kgm3'] - r['ref_kgm3']) / r['ref_kgm3'] * 100:+.0f}%"
+                if pd.notna(r["ref_kgm3"]) and r["ref_kgm3"] > 0 else "—", axis=1)
+
+            def _farol_bench(row):
+                if pd.isna(row["ref_kgm3"]) or row["ref_kgm3"] == 0: return "—"
+                pct = (row["total_kgm3"] - row["ref_kgm3"]) / row["ref_kgm3"] * 100
+                if pct > 20: return "🔴 Alto"
+                if pct > 5:  return "🟡 Médio"
+                return "🟢 Normal"
+
+            bench["Referência"] = bench.apply(_farol_bench, axis=1)
+            bench = bench.sort_values("total_kgm3", ascending=False)
+
+            if tem_breakdown:
+                df_bench_show = bench[["produto", "frouxo_m3", "cord_v_m3",
+                                       "cord_l_m3", "total_kgm3", "vs_ref", "Referência"]].copy()
+                df_bench_show.columns = ["Produto", "Frouxo kg/m³", "Cord.Viga kg/m³",
+                                          "Cord.Laje kg/m³", "Total kg/m³", "vs Hist.", "Status"]
+            else:
+                df_bench_show = bench[["produto", "total_kgm3", "vs_ref", "Referência"]].copy()
+                df_bench_show.columns = ["Produto", "kg/m³", "vs Hist.", "Status"]
+
+            st.dataframe(
+                df_bench_show,
+                use_container_width=True, hide_index=True,
+                height=min(500, 36 + 35 * len(df_bench_show)))
+
+        st.divider()
+
+        # ── Bloco D — Pizza de composição + Prazo pátio ────
+        col_pizza, col_patio_bloco = st.columns(2)
+
+        with col_pizza:
+            st.markdown("#### 🥧 Composição do aço")
+            if not df_fab_f.empty and tem_breakdown and aco_total > 0:
+                labels_p = ["Frouxo", "Cord. Viga", "Cord. Laje"]
+                values_p = [aco_frouxo, aco_cord_viga, aco_cord_laje]
+                values_p = [v for v in values_p if v > 0]
+                labels_p = [l for l, v in zip(labels_p,
+                             [aco_frouxo, aco_cord_viga, aco_cord_laje]) if v > 0]
+                fig_pizza = go.Figure(go.Pie(
+                    labels=labels_p, values=values_p,
+                    hole=0.45,
+                    marker_colors=["#1976D2", "#FB8C00", "#43A047"],
+                    textinfo="label+percent",
+                    hovertemplate="%{label}<br>%{value:,.0f} kg<br>%{percent}<extra></extra>"))
+                fig_pizza.update_layout(
+                    showlegend=False,
+                    margin=dict(t=20, b=20, l=20, r=20), height=340)
+                st.plotly_chart(fig_pizza, use_container_width=True, key="chart_pizza_aco")
+            elif not df_fab_f.empty and aco_total > 0:
+                st.info("Breakdown por tipo de aço não disponível. "
+                        "Adicione colunas peso_aco_frouxo / peso_aco_cord_viga / peso_aco_cord_laje.")
+            else:
+                st.info("Sem dados de aço.")
+
+        with col_patio_bloco:
+            st.markdown("#### 🏗️ Aço por m³ por produto (Top 20)")
+            if not df_fab_f.empty:
+                aco_prod = (df_fab_f.groupby("produto")
+                            .agg(aco=("peso_aco", "sum"), vol=("volume_total", "sum"))
+                            .reset_index())
+                aco_prod = aco_prod[aco_prod["vol"] > 0].copy()
+                aco_prod["kgm3"] = aco_prod["aco"] / aco_prod["vol"]
+                aco_prod = (aco_prod[aco_prod["kgm3"] > 0]
+                            .sort_values("kgm3", ascending=True).tail(20))
+                if not aco_prod.empty:
+                    fig_aco_p = go.Figure(go.Bar(
+                        x=aco_prod["kgm3"], y=aco_prod["produto"],
+                        orientation="h", marker_color="#E53935",
+                        hovertemplate="%{y}<br>%{x:.2f} kg/m³<extra></extra>"))
+                    fig_aco_p.update_layout(
+                        xaxis=dict(title="kg aço / m³"),
+                        yaxis=dict(autorange="reversed"),
+                        margin=dict(t=20, b=20, r=20), height=420)
+                    st.plotly_chart(fig_aco_p, use_container_width=True, key="chart_aco_prod")
+            else:
+                st.info("Sem dados de fabricação.")
+
+        st.divider()
+
+        # ── Bloco E — Prazo no pátio ────────────────────────
+        st.markdown("#### ⏱️ Prazo no pátio (Fab → Expedição)")
         col_pat, col_hist = st.columns(2)
 
         with col_pat:
-            st.markdown("#### ⏱️ Prazo médio no pátio por obra")
+            st.markdown("##### Por obra")
             if not df_patio.empty:
                 prazo_obra = (df_patio.groupby("obra_id")["dias_patio"]
                               .mean().reset_index())
@@ -1973,20 +2220,21 @@ elif pagina_selecionada == "🏭 Produção":
                     prazo_obra[["Obra", "Dias", "Status"]],
                     use_container_width=True, hide_index=True,
                     height=min(420, 36 + 35 * len(prazo_obra)))
+                st.caption("🔴 > 20 dias   🟡 10–20 dias   🟢 < 10 dias")
             else:
                 st.info("Sem dados de prazo no pátio.")
 
         with col_hist:
-            st.markdown("#### 📊 Distribuição do prazo no pátio")
+            st.markdown("##### Distribuição de peças")
             if not df_patio.empty:
-                bins   = [0, 7, 15, 30, float("inf")]
-                labels = ["0–7 dias", "7–15 dias", "15–30 dias", "+30 dias"]
+                bins   = [0, 7, 15, 30, 60, float("inf")]
+                labels = ["0–7 dias", "7–15 dias", "15–30 dias", "30–60 dias", "+60 dias"]
                 dias   = df_patio["dias_patio"].clip(lower=0)
                 conts  = (pd.cut(dias, bins=bins, labels=labels, right=False)
                           .value_counts().reindex(labels))
                 fig_hist = go.Figure(go.Bar(
                     x=conts.index, y=conts.values,
-                    marker_color=["#43A047", "#FBC02D", "#FB8C00", "#E53935"],
+                    marker_color=["#43A047", "#8BC34A", "#FBC02D", "#FB8C00", "#E53935"],
                     hovertemplate="%{x}<br>%{y} peças<extra></extra>"))
                 fig_hist.update_layout(
                     xaxis_title="Faixa de prazo",
@@ -1995,27 +2243,3 @@ elif pagina_selecionada == "🏭 Produção":
                 st.plotly_chart(fig_hist, use_container_width=True, key="chart_hist_patio")
             else:
                 st.info("Sem dados de pátio.")
-
-        st.divider()
-
-        # ── Composição de aço por produto ──────────────────
-        st.markdown("#### 🏗️ Aço por m³ por produto (Top 20)")
-        if not df_fab_f.empty:
-            aco_prod = (df_fab_f.groupby("produto")
-                        .agg(aco=("peso_aco", "sum"), vol=("volume_total", "sum"))
-                        .reset_index())
-            aco_prod = aco_prod[aco_prod["vol"] > 0].copy()
-            aco_prod["kgm3"] = aco_prod["aco"] / aco_prod["vol"]
-            aco_prod = aco_prod[aco_prod["kgm3"] > 0].sort_values("kgm3", ascending=True).tail(20)
-            if not aco_prod.empty:
-                fig_aco_p = go.Figure(go.Bar(
-                    x=aco_prod["kgm3"], y=aco_prod["produto"],
-                    orientation="h", marker_color="#E53935",
-                    hovertemplate="%{y}<br>%{x:.2f} kg/m³<extra></extra>"))
-                fig_aco_p.update_layout(
-                    xaxis=dict(title="kg aço / m³"),
-                    yaxis=dict(autorange="reversed"),
-                    margin=dict(t=20, b=20, r=20), height=420)
-                st.plotly_chart(fig_aco_p, use_container_width=True, key="chart_aco_prod")
-        else:
-            st.info("Sem dados de fabricação.")
