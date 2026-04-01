@@ -423,9 +423,25 @@ def carregar_template():
 
 @st.cache_data(ttl=60)
 def carregar_tarefas(obra_id):
+    if obra_id == "TODAS":
+        resp = supabase.table("obras_tarefas")\
+            .select("*, obras(nome), responsavel:equipe!obras_tarefas_responsavel_id_fkey(nome)")\
+            .not_.in_("status",["Concluído","N/A"])\
+            .not_.is_("obra_id", "null")\
+            .execute()
+    else:
+        resp = supabase.table("obras_tarefas")\
+            .select("*, obras(nome), responsavel:equipe!obras_tarefas_responsavel_id_fkey(nome)")\
+            .eq("obra_id", obra_id)\
+            .not_.is_("obra_id", "null")\
+            .execute()
+    return resp.data
+
+@st.cache_data(ttl=60)
+def carregar_extras():
     resp = supabase.table("obras_tarefas")\
-        .select("*, responsavel:equipe!obras_tarefas_responsavel_id_fkey(nome), aprovador:equipe!obras_tarefas_aprovador_id_fkey(nome)")\
-        .eq("obra_id", obra_id)\
+        .select("*, responsavel:equipe!obras_tarefas_responsavel_id_fkey(nome)")\
+        .is_("obra_id", "null")\
         .execute()
     return resp.data
 
@@ -436,7 +452,7 @@ def carregar_alertas():
     limit = hoje + timedelta(days=2)
     try:
         resp = supabase.table("obras_tarefas")\
-            .select("descricao, entrega_prevista, status, obras(nome)")\
+            .select("descricao, entrega_prevista, status, obras(nome), origem")\
             .not_.in_("status",["Concluído","N/A"])\
             .lte("entrega_prevista", limit.isoformat())\
             .gte("entrega_prevista", hoje.isoformat())\
@@ -484,10 +500,90 @@ def limpar_cache():
     carregar_equipe_ativa.clear()
     carregar_template.clear()
     carregar_tarefas.clear()
+    carregar_extras.clear()
     carregar_alertas.clear()
 
+def montar_df(tarefas, modo="obras"):
+    import pandas as pd
+    rows = []
+    for t in tarefas:
+        obra_nome = (t.get("obras") or {}).get("nome","—") if modo == "todas" else None
+        resp_nome = (t.get("responsavel") or {}).get("nome","—")
+        row = {
+            "_id":       t["id"],
+            "GUT":       gut_emoji(t.get("gut_score") or 1),
+            "Etapa":     t.get("etapa") or "—",
+            "Descrição": f"{calcular_farol(t.get('entrega_prevista'), t['status'])} {t.get('descricao') or '—'}",
+            "Resp.":     resp_nome,
+            "Status":    t["status"],
+            "Desvio":    calcular_desvio(t.get("entrega_prevista"), t.get("entrega_real"), t["status"]),
+            "Av.%":      t.get("avanco_percent") or 0,
+        }
+        if modo == "todas":
+            row["Obra"] = obra_nome
+        if modo == "extras":
+            row["Origem"] = t.get("origem") or "—"
+        rows.append(row)
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+def form_edicao(t, equipe_nomes, equipe_ids, suffix=""):
+    """Formulário de edição reutilizável para obras e extras."""
+    STATUS_OPCOES = ["A Iniciar","Em Andamento","Impedido","Concluído","N/A"]
+    resp_nome = (t.get("responsavel") or {}).get("nome","—")
+
+    ea,eb,ec = st.columns(3)
+    r_nome = ea.selectbox("R",equipe_nomes,
+        index=equipe_nomes.index(resp_nome) if resp_nome in equipe_nomes else 0,
+        key=f"r_{t['id']}{suffix}")
+    a_nome = eb.selectbox("A",["—"]+equipe_nomes, key=f"a_{t['id']}{suffix}")
+    c_nome = ec.selectbox("C",["—"]+equipe_nomes, key=f"c_{t['id']}{suffix}")
+    i_nome = ea.selectbox("I",["—"]+equipe_nomes, key=f"i_{t['id']}{suffix}")
+
+    novo_status = eb.selectbox("Status", STATUS_OPCOES,
+        index=STATUS_OPCOES.index(t["status"]) if t["status"] in STATUS_OPCOES else 0,
+        key=f"st_{t['id']}{suffix}")
+    novo_avanco = ec.slider("% Avanço",0,100,
+        t.get("avanco_percent") or 0, step=5, key=f"av_{t['id']}{suffix}")
+
+    novo_imp = t.get("impedimento") or ""
+    if novo_status == "Impedido":
+        novo_imp = st.text_input("🚧 Impedimento", value=novo_imp, key=f"imp_{t['id']}{suffix}")
+
+    fd1,fd2,fd3 = st.columns(3)
+    novo_inicio  = fd1.date_input("Início",  value=parse_date(t.get("inicio_previsto")),  key=f"ini_{t['id']}{suffix}",  format="DD/MM/YYYY")
+    novo_entrega = fd2.date_input("Entrega", value=parse_date(t.get("entrega_prevista")), key=f"ent_{t['id']}{suffix}",  format="DD/MM/YYYY")
+    novo_real    = fd3.date_input("Real",    value=parse_date(t.get("entrega_real")),     key=f"real_{t['id']}{suffix}", format="DD/MM/YYYY")
+
+    gg1,gg2,gg3,gg4 = st.columns(4)
+    ng = gg1.slider("G",1,5,t.get("gut_gravidade") or 1, key=f"g_{t['id']}{suffix}")
+    nu = gg2.slider("U",1,5,t.get("gut_urgencia")  or 1, key=f"u_{t['id']}{suffix}")
+    nt = gg3.slider("T",1,5,t.get("gut_tendencia") or 1, key=f"te_{t['id']}{suffix}")
+    gg4.metric("GUT", ng*nu*nt)
+
+    novo_obs = st.text_area("Obs.", value=t.get("observacoes") or "",
+        key=f"obs_{t['id']}{suffix}", height=50)
+
+    if st.button("💾 Salvar", type="primary", key=f"save_{t['id']}{suffix}"):
+        supabase.table("obras_tarefas").update({
+            "responsavel_id":   equipe_ids.get(r_nome),
+            "aprovador_id":     equipe_ids.get(a_nome) if a_nome != "—" else None,
+            "consultado_id":    equipe_ids.get(c_nome) if c_nome != "—" else None,
+            "informado_id":     equipe_ids.get(i_nome) if i_nome != "—" else None,
+            "status":           novo_status,
+            "impedimento":      novo_imp or None,
+            "avanco_percent":   novo_avanco,
+            "inicio_previsto":  novo_inicio.isoformat()  if novo_inicio  else None,
+            "entrega_prevista": novo_entrega.isoformat() if novo_entrega else None,
+            "entrega_real":     novo_real.isoformat()    if novo_real    else None,
+            "gut_gravidade":    ng,"gut_urgencia":nu,"gut_tendencia":nt,
+            "gut_score":        ng*nu*nt,
+            "observacoes":      novo_obs or None,
+        }).eq("id",t["id"]).execute()
+        limpar_cache()
+        st.success("✅ Salvo!"); st.rerun()
+
 # ==========================================================
-# PÁGINA: GESTÃO DE OBRAS (SÚMULA)
+# PÁGINA: GESTÃO DE OBRAS
 # ==========================================================
 if pagina_selecionada == "🏗️ Gestão de Obras":
     import pandas as pd
@@ -505,258 +601,295 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
 
     if not obras: st.error("Nenhuma obra cadastrada."); st.stop()
 
-    # ── ALERTA COMPACTO ───────────────────────────────────
+    # ── CABEÇALHO COMPACTO ────────────────────────────────
+    h1,h2,h3,h4 = st.columns([1,3,1,1])
+    h1.markdown("**🏗️ Gestão de Obras**")
+
+    # alerta inline no cabeçalho
     if not st.session_state["fechar_alerta"]:
         alertas = carregar_alertas()
         if alertas:
-            a1, a2 = st.columns([11,1])
-            with a1:
-                with st.expander(f"⚠️ {len(alertas)} tarefa(s) vencem em até 2 dias", expanded=False):
-                    for a in alertas:
-                        obra_nome = (a.get("obras") or {}).get("nome","?")
-                        st.caption(f"📌 {obra_nome} · {a['descricao']} · `{a.get('entrega_prevista','?')}`")
-            with a2:
-                if st.button("✕", key="btn_fechar_alerta"):
-                    st.session_state["fechar_alerta"] = True
-                    st.rerun()
-
-    # ── SELEÇÃO DE OBRA ───────────────────────────────────
-    r1,r2,r3 = st.columns([1,3,1])
-    status_disponiveis = sorted(set(o.get("status") or "—" for o in obras))
-    filtro_status_obra = r1.selectbox("Status",["Todos"]+status_disponiveis,
-        key="filt_obra_status", label_visibility="collapsed")
-
-    obras_filtradas = obras if filtro_status_obra == "Todos" \
-        else [o for o in obras if o.get("status") == filtro_status_obra]
-    if not obras_filtradas: st.warning("Nenhuma obra."); st.stop()
-
-    try:
-        upd = supabase.table("obras_tarefas").select("obra_id, created_at")\
-            .order("created_at", desc=True).execute().data
-        ultimo_upd = {}
-        for u in upd:
-            if u["obra_id"] not in ultimo_upd:
-                ultimo_upd[u["obra_id"]] = u.get("created_at","")[:10]
-    except: ultimo_upd = {}
-
-    def label_obra(o):
-        upd_str = ultimo_upd.get(o["id"])
-        return f"{o['codigo']} — {o['nome']}" + (f" · 🕐{upd_str}" if upd_str else "")
-
-    opcoes_obras = {label_obra(o): o["id"] for o in obras_filtradas}
-    obra_label   = r2.selectbox("Obra", list(opcoes_obras.keys()),
-        key="sel_obra", label_visibility="collapsed")
-    obra_id = opcoes_obras[obra_label]
-
-    if r3.button("🔄 Atualizar"):
+            with h2.expander(f"⚠️ {len(alertas)} vencem em 2 dias"):
+                for a in alertas:
+                    obra_n = (a.get("obras") or {}).get("nome") or a.get("origem") or "Extra"
+                    st.caption(f"📌 {obra_n} · {a['descricao']} · `{a.get('entrega_prevista','?')}`")
+            if h3.button("✕ alertas"):
+                st.session_state["fechar_alerta"] = True; st.rerun()
+    if h4.button("🔄 Atualizar"):
         limpar_cache(); st.rerun()
 
-    # ── CARREGA E PREPARA DADOS ───────────────────────────
-    tarefas = carregar_tarefas(obra_id)
+    st.divider()
 
-    # métricas
-    if tarefas:
-        total      = len(tarefas)
-        concluidas = sum(1 for t in tarefas if t["status"] == "Concluído")
-        atrasadas  = sum(1 for t in tarefas if calcular_farol(t.get("entrega_prevista"), t["status"]) == "🔴")
-        impedidas  = sum(1 for t in tarefas if t["status"] == "Impedido")
-        pct        = int(concluidas / total * 100) if total else 0
-        st.progress(pct/100)
-        st.caption(f"**{pct}% concluído** · 📋 {total} · ✅ {concluidas} · 🔴 {atrasadas} · 🚧 {impedidas}")
+    # ── ABAS ──────────────────────────────────────────────
+    aba_obras, aba_extras = st.tabs(["🏗️ Obras", "📌 Extras"])
 
-    # ── FILTROS ───────────────────────────────────────────
-    etapas_disp = sorted(set(t.get("etapa") or "—" for t in tarefas if t.get("etapa")))
-    fc1,fc2,fc3,fc4,fc5 = st.columns([2,2,2,2,1])
-    f_etapa  = fc1.selectbox("Etapa",  ["Todas"]+etapas_disp,    key="f_etapa",   label_visibility="collapsed")
-    f_status = fc2.selectbox("Status", ["Todos"]+STATUS_OPCOES,  key="f_fstatus", label_visibility="collapsed")
-    f_resp   = fc3.selectbox("Resp.",  ["Todos"]+equipe_nomes,   key="f_resp",    label_visibility="collapsed")
-    f_gut    = fc4.selectbox("GUT",    ["Todos","🔴 Alto","🟡 Médio","🟢 Baixo"], key="f_gut", label_visibility="collapsed")
-    f_conc   = fc5.checkbox("✅+N/A",  value=False, key="f_conc")
+    # ══════════════════════════════════════════════════════
+    # ABA 1 — OBRAS
+    # ══════════════════════════════════════════════════════
+    with aba_obras:
 
-    # ── NOVA TAREFA ───────────────────────────────────────
-    with st.expander("➕ Nova tarefa", expanded=False):
-        template        = carregar_template()
-        etapas_template = sorted(set(t.get("etapa","") for t in template if t.get("etapa")))
-        etapas_obra     = sorted(set(t.get("etapa","") for t in tarefas  if t.get("etapa")))
-        etapas_combo    = sorted(set(etapas_template + etapas_obra))
-        desc_por_etapa  = {}
-        for t in template + tarefas:
-            ep = t.get("etapa","")
-            desc_por_etapa.setdefault(ep,[]).append(t.get("descricao",""))
+        # seleção compacta
+        s1,s2,s3 = st.columns([1,3,1])
+        status_disp = sorted(set(o.get("status") or "—" for o in obras))
+        f_status_obra = s1.selectbox("",["Todos"]+status_disp,
+            key="filt_obra_status", label_visibility="collapsed")
 
-        na1,na2,na3 = st.columns(3)
-        n_etapa_sel = na1.selectbox("Etapa",["(nova)"]+etapas_combo, key="n_etapa_sel")
-        n_etapa     = na1.text_input("Nome da etapa", key="n_etapa_livre") \
-                      if n_etapa_sel == "(nova)" else n_etapa_sel
-        n_item      = na2.text_input("Item", key="n_item")
-        n_status    = na3.selectbox("Status", STATUS_OPCOES, key="n_status")
+        obras_f = obras if f_status_obra == "Todos" \
+            else [o for o in obras if o.get("status") == f_status_obra]
 
-        descs = sorted(set(desc_por_etapa.get(n_etapa,[]))) if n_etapa_sel != "(nova)" else []
-        if descs:
-            n_desc_sel = st.selectbox("Descrição sugerida",["(escrever)"]+descs, key="n_desc_sel")
-            n_desc = st.text_input("Descrição", key="n_desc_livre") \
-                     if n_desc_sel == "(escrever)" else n_desc_sel
-        else:
-            n_desc = st.text_input("Descrição", key="n_desc_livre2")
-        n_obs = st.text_area("Observação", key="n_obs", height=50)
+        try:
+            upd = supabase.table("obras_tarefas").select("obra_id, created_at")\
+                .order("created_at", desc=True).execute().data
+            ultimo_upd = {}
+            for u in upd:
+                if u["obra_id"] not in ultimo_upd:
+                    ultimo_upd[u["obra_id"]] = u.get("created_at","")[:10]
+        except: ultimo_upd = {}
 
-        nr1,nr2,nr3,nr4 = st.columns(4)
-        n_r = nr1.selectbox("R", equipe_nomes, key="n_r")
-        n_a = nr2.selectbox("A",["—"]+equipe_nomes, key="n_a")
-        n_c = nr3.selectbox("C",["—"]+equipe_nomes, key="n_c")
-        n_i = nr4.selectbox("I",["—"]+equipe_nomes, key="n_i")
+        def label_obra(o):
+            upd_str = ultimo_upd.get(o["id"])
+            return f"{o['codigo']} — {o['nome']}" + (f" · 🕐{upd_str}" if upd_str else "")
 
-        nd1,nd2 = st.columns(2)
-        n_inicio  = nd1.date_input("Início",  value=None, key="n_ini", format="DD/MM/YYYY")
-        n_entrega = nd2.date_input("Entrega", value=None, key="n_ent", format="DD/MM/YYYY")
+        opcoes = {"🌐 Todas as obras (não concluídas)": "TODAS"}
+        opcoes.update({label_obra(o): o["id"] for o in obras_f})
 
-        ng1,ng2,ng3,ng4 = st.columns(4)
-        n_g = ng1.slider("G",1,5,1,key="n_g")
-        n_u = ng2.slider("U",1,5,1,key="n_u")
-        n_t = ng3.slider("T",1,5,1,key="n_t")
-        ng4.metric("GUT", n_g*n_u*n_t)
+        obra_label = s2.selectbox("", list(opcoes.keys()),
+            key="sel_obra", label_visibility="collapsed")
+        obra_id = opcoes[obra_label]
+        modo = "todas" if obra_id == "TODAS" else "obras"
 
-        if st.button("💾 Criar", type="primary", key="btn_nova"):
-            if n_desc:
-                supabase.table("obras_tarefas").insert({
-                    "obra_id":          obra_id,
-                    "item":             n_item or None,
-                    "etapa":            n_etapa or None,
-                    "descricao":        n_desc,
-                    "observacoes":      n_obs or None,
-                    "responsavel_id":   equipe_ids.get(n_r),
-                    "aprovador_id":     equipe_ids.get(n_a) if n_a != "—" else None,
-                    "consultado_id":    equipe_ids.get(n_c) if n_c != "—" else None,
-                    "informado_id":     equipe_ids.get(n_i) if n_i != "—" else None,
-                    "status":           n_status,
-                    "inicio_previsto":  n_inicio.isoformat()  if n_inicio  else None,
-                    "entrega_prevista": n_entrega.isoformat() if n_entrega else None,
-                    "gut_gravidade":    n_g,"gut_urgencia":n_u,"gut_tendencia":n_t,
-                    "gut_score":        n_g*n_u*n_t,"avanco_percent":0,
-                }).execute()
-                limpar_cache(); st.success("✅ Criada!"); st.rerun()
+        tarefas = carregar_tarefas(obra_id)
+
+        # métricas
+        if tarefas:
+            total      = len(tarefas)
+            concluidas = sum(1 for t in tarefas if t["status"] == "Concluído")
+            atrasadas  = sum(1 for t in tarefas if calcular_farol(t.get("entrega_prevista"), t["status"]) == "🔴")
+            impedidas  = sum(1 for t in tarefas if t["status"] == "Impedido")
+            pct        = int(concluidas / total * 100) if total else 0
+            st.progress(pct/100)
+            st.caption(f"**{pct}%** · 📋{total} · ✅{concluidas} · 🔴{atrasadas} · 🚧{impedidas}")
+
+        # filtros
+        etapas_disp = sorted(set(t.get("etapa") or "—" for t in tarefas if t.get("etapa")))
+        fc1,fc2,fc3,fc4,fc5 = st.columns([2,2,2,2,1])
+        f_etapa  = fc1.selectbox("",["Todas"]+etapas_disp,    key="f_etapa",   label_visibility="collapsed")
+        f_fstatus= fc2.selectbox("",["Todos"]+STATUS_OPCOES,  key="f_fstatus", label_visibility="collapsed")
+        f_resp   = fc3.selectbox("",["Todos"]+equipe_nomes,   key="f_resp",    label_visibility="collapsed")
+        f_gut    = fc4.selectbox("",["GUT: Todos","🔴 Alto","🟡 Médio","🟢 Baixo"], key="f_gut", label_visibility="collapsed")
+        f_conc   = fc5.checkbox("✅",value=False,key="f_conc", help="Mostrar concluídas")
+
+        # nova tarefa
+        with st.expander("➕ Nova tarefa"):
+            template        = carregar_template()
+            etapas_template = sorted(set(t.get("etapa","") for t in template if t.get("etapa")))
+            etapas_obra     = sorted(set(t.get("etapa","") for t in tarefas  if t.get("etapa")))
+            etapas_combo    = sorted(set(etapas_template + etapas_obra))
+            desc_por_etapa  = {}
+            for t in template + tarefas:
+                ep = t.get("etapa","")
+                desc_por_etapa.setdefault(ep,[]).append(t.get("descricao",""))
+
+            na1,na2,na3 = st.columns(3)
+
+            # se visão global, precisa escolher a obra
+            if modo == "todas":
+                opcoes_obra_nova = {f"{o['codigo']} — {o['nome']}": o["id"] for o in obras}
+                obra_nova_label  = na1.selectbox("Obra destino", list(opcoes_obra_nova.keys()), key="n_obra_dest")
+                obra_nova_id     = opcoes_obra_nova[obra_nova_label]
             else:
-                st.warning("Descrição é obrigatória.")
+                obra_nova_id = obra_id
 
-    # ── SEM TAREFAS ───────────────────────────────────────
-    if not tarefas:
-        st.info("Esta obra ainda não possui tarefas.")
-        template = carregar_template()
-        if template and st.button("📋 Criar do Template", type="primary"):
-            supabase.table("obras_tarefas").insert([{
-                "obra_id":obra_id,"item":str(t.get("item","")),
-                "etapa":t.get("etapa"),"descricao":t.get("descricao"),
-                "status":t.get("status_padrao") or "A Iniciar",
-                "gut_gravidade":1,"gut_urgencia":1,"gut_tendencia":1,
-                "gut_score":1,"avanco_percent":0,
-            } for t in template]).execute()
-            limpar_cache(); st.rerun()
-        st.stop()
+            n_etapa_sel = na2.selectbox("Etapa",["(nova)"]+etapas_combo, key="n_etapa_sel")
+            n_etapa     = na2.text_input("Nome", key="n_etapa_livre") \
+                          if n_etapa_sel == "(nova)" else n_etapa_sel
+            n_item      = na3.text_input("Item", key="n_item")
+            n_status    = na1.selectbox("Status", STATUS_OPCOES, key="n_status")
 
-    # ── APLICA FILTROS ────────────────────────────────────
-    tf = tarefas
-    if not f_conc:          tf = [t for t in tf if t["status"] not in ("Concluído","N/A")]
-    if f_etapa  != "Todas": tf = [t for t in tf if t.get("etapa") == f_etapa]
-    if f_status != "Todos": tf = [t for t in tf if t["status"] == f_status]
-    if f_resp   != "Todos": tf = [t for t in tf if (t.get("responsavel") or {}).get("nome") == f_resp]
-    if "Alto"   in f_gut:   tf = [t for t in tf if (t.get("gut_score") or 1) >= 75]
-    elif "Médio" in f_gut:  tf = [t for t in tf if 27 <= (t.get("gut_score") or 1) < 75]
-    elif "Baixo" in f_gut:  tf = [t for t in tf if (t.get("gut_score") or 1) < 27]
+            descs = sorted(set(desc_por_etapa.get(n_etapa,[]))) if n_etapa_sel != "(nova)" else []
+            if descs:
+                n_desc_sel = st.selectbox("Descrição",["(escrever)"]+descs, key="n_desc_sel")
+                n_desc = st.text_input("Desc. livre", key="n_desc_livre") \
+                         if n_desc_sel == "(escrever)" else n_desc_sel
+            else:
+                n_desc = st.text_input("Descrição *", key="n_desc_livre2")
+            n_obs = st.text_area("Observação", key="n_obs", height=50)
 
-    # ── MONTA DATAFRAME ───────────────────────────────────
-    rows = []
-    for t in tf:
-        rows.append({
-            "_id":        t["id"],
-            "GUT":        gut_emoji(t.get("gut_score") or 1),
-            "Etapa":      t.get("etapa") or "—",
-            "Descrição":  f"{calcular_farol(t.get('entrega_prevista'), t['status'])} {t.get('descricao') or '—'}",
-            "Resp.":      (t.get("responsavel") or {}).get("nome","—"),
-            "Status":     t["status"],
-            "Desvio":     calcular_desvio(t.get("entrega_prevista"), t.get("entrega_real"), t["status"]),
-            "Av.%":       t.get("avanco_percent") or 0,
-        })
+            nr1,nr2,nr3,nr4 = st.columns(4)
+            n_r = nr1.selectbox("R",equipe_nomes,key="n_r")
+            n_a = nr2.selectbox("A",["—"]+equipe_nomes,key="n_a")
+            n_c = nr3.selectbox("C",["—"]+equipe_nomes,key="n_c")
+            n_i = nr4.selectbox("I",["—"]+equipe_nomes,key="n_i")
 
-    df = pd.DataFrame(rows)
-    st.caption(f"**{len(df)}** tarefa(s) · clique em uma linha para editar")
+            nd1,nd2 = st.columns(2)
+            n_inicio  = nd1.date_input("Início", value=None, key="n_ini", format="DD/MM/YYYY")
+            n_entrega = nd2.date_input("Entrega",value=None, key="n_ent", format="DD/MM/YYYY")
 
-    # ── TABELA NATIVA ─────────────────────────────────────
-    sel = st.dataframe(
-        df.drop(columns=["_id"]),
-        use_container_width=True,
-        hide_index=True,
-        height=min(400, 36 + 35 * len(df)),
-        on_select="rerun",
-        selection_mode="single-row",
-        column_config={
-            "GUT":       st.column_config.TextColumn("GUT",      width="small"),
-            "Etapa":     st.column_config.TextColumn("Etapa",    width="medium"),
+            ng1,ng2,ng3,ng4 = st.columns(4)
+            n_g = ng1.slider("G",1,5,1,key="n_g")
+            n_u = ng2.slider("U",1,5,1,key="n_u")
+            n_t = ng3.slider("T",1,5,1,key="n_t")
+            ng4.metric("GUT",n_g*n_u*n_t)
+
+            if st.button("💾 Criar", type="primary", key="btn_nova"):
+                if n_desc:
+                    supabase.table("obras_tarefas").insert({
+                        "obra_id":obra_nova_id,"item":n_item or None,
+                        "etapa":n_etapa or None,"descricao":n_desc,
+                        "observacoes":n_obs or None,
+                        "responsavel_id":equipe_ids.get(n_r),
+                        "aprovador_id":equipe_ids.get(n_a) if n_a!="—" else None,
+                        "consultado_id":equipe_ids.get(n_c) if n_c!="—" else None,
+                        "informado_id":equipe_ids.get(n_i) if n_i!="—" else None,
+                        "status":n_status,
+                        "inicio_previsto":n_inicio.isoformat() if n_inicio else None,
+                        "entrega_prevista":n_entrega.isoformat() if n_entrega else None,
+                        "gut_gravidade":n_g,"gut_urgencia":n_u,"gut_tendencia":n_t,
+                        "gut_score":n_g*n_u*n_t,"avanco_percent":0,
+                    }).execute()
+                    limpar_cache(); st.success("✅ Criada!"); st.rerun()
+                else: st.warning("Descrição obrigatória.")
+
+        # sem tarefas
+        if not tarefas and modo != "todas":
+            st.info("Obra sem tarefas.")
+            template = carregar_template()
+            if template and st.button("📋 Criar do Template", type="primary"):
+                supabase.table("obras_tarefas").insert([{
+                    "obra_id":obra_id,"item":str(t.get("item","")),
+                    "etapa":t.get("etapa"),"descricao":t.get("descricao"),
+                    "status":t.get("status_padrao") or "A Iniciar",
+                    "gut_gravidade":1,"gut_urgencia":1,"gut_tendencia":1,
+                    "gut_score":1,"avanco_percent":0,
+                } for t in template]).execute()
+                limpar_cache(); st.rerun()
+            st.stop()
+
+        # aplica filtros
+        tf = tarefas
+        if not f_conc:          tf = [t for t in tf if t["status"] not in ("Concluído","N/A")]
+        if f_etapa  != "Todas": tf = [t for t in tf if t.get("etapa") == f_etapa]
+        if f_fstatus!= "Todos": tf = [t for t in tf if t["status"] == f_fstatus]
+        if f_resp   != "Todos": tf = [t for t in tf if (t.get("responsavel") or {}).get("nome") == f_resp]
+        if "Alto"   in f_gut:   tf = [t for t in tf if (t.get("gut_score") or 1) >= 75]
+        elif "Médio" in f_gut:  tf = [t for t in tf if 27 <= (t.get("gut_score") or 1) < 75]
+        elif "Baixo" in f_gut:  tf = [t for t in tf if (t.get("gut_score") or 1) < 27]
+
+        if not tf: st.info("Nenhuma tarefa com os filtros."); st.stop()
+
+        # monta dataframe
+        df = montar_df(tf, modo=modo)
+        cols_exib = [c for c in df.columns if c != "_id"]
+        col_cfg = {
+            "GUT":       st.column_config.TextColumn("GUT",     width="small"),
+            "Etapa":     st.column_config.TextColumn("Etapa",   width="small"),
             "Descrição": st.column_config.TextColumn("Descrição",width="large"),
-            "Resp.":     st.column_config.TextColumn("Resp.",    width="medium"),
-            "Status":    st.column_config.TextColumn("Status",   width="medium"),
-            "Desvio":    st.column_config.TextColumn("Desvio",   width="small"),
-            "Av.%":      st.column_config.ProgressColumn("Av.%", min_value=0, max_value=100, width="small"),
+            "Resp.":     st.column_config.TextColumn("Resp.",   width="small"),
+            "Status":    st.column_config.TextColumn("Status",  width="small"),
+            "Desvio":    st.column_config.TextColumn("Desvio",  width="small"),
+            "Av.%":      st.column_config.ProgressColumn("Av.%",min_value=0,max_value=100,width="small"),
         }
-    )
+        if modo == "todas":
+            col_cfg["Obra"] = st.column_config.TextColumn("Obra", width="medium")
 
-    # ── FORMULÁRIO DE EDIÇÃO ──────────────────────────────
-    linhas_sel = sel.selection.rows if sel.selection else []
-    if linhas_sel:
-        idx = linhas_sel[0]
-        t   = tf[idx]
-        st.divider()
-        st.markdown(f"**✏️ Editando:** {t.get('descricao','')}")
+        st.caption(f"**{len(tf)}** tarefa(s)")
+        sel = st.dataframe(df[cols_exib], use_container_width=True, hide_index=True,
+            height=min(420, 36+35*len(df)), on_select="rerun",
+            selection_mode="single-row", column_config=col_cfg)
 
-        resp_nome = (t.get("responsavel") or {}).get("nome","—")
+        linhas = sel.selection.rows if sel.selection else []
+        if linhas:
+            t = tf[linhas[0]]
+            st.divider()
+            st.caption(f"✏️ **{t.get('descricao','')}**")
+            form_edicao(t, equipe_nomes, equipe_ids, suffix="_ob")
 
-        ea,eb,ec = st.columns(3)
-        r_nome = ea.selectbox("R — Responsável", equipe_nomes,
-            index=equipe_nomes.index(resp_nome) if resp_nome in equipe_nomes else 0,
-            key=f"r_{t['id']}")
-        a_nome = eb.selectbox("A — Aprovador",  ["—"]+equipe_nomes, key=f"a_{t['id']}")
-        c_nome = ec.selectbox("C — Consultado", ["—"]+equipe_nomes, key=f"c_{t['id']}")
-        i_nome = ea.selectbox("I — Informado",  ["—"]+equipe_nomes, key=f"i_{t['id']}")
+    # ══════════════════════════════════════════════════════
+    # ABA 2 — EXTRAS
+    # ══════════════════════════════════════════════════════
+    with aba_extras:
 
-        novo_status = eb.selectbox("Status", STATUS_OPCOES,
-            index=STATUS_OPCOES.index(t["status"]) if t["status"] in STATUS_OPCOES else 0,
-            key=f"st_{t['id']}")
-        novo_avanco = ec.slider("% Avanço",0,100,t.get("avanco_percent") or 0,
-            step=5, key=f"av_{t['id']}")
+        extras = carregar_extras()
 
-        novo_imp = t.get("impedimento") or ""
-        if novo_status == "Impedido":
-            novo_imp = st.text_input("🚧 Impedimento", value=novo_imp, key=f"imp_{t['id']}")
+        # filtros
+        ec1,ec2,ec3 = st.columns([2,2,1])
+        ef_resp   = ec1.selectbox("",["Todos"]+equipe_nomes, key="ef_resp",   label_visibility="collapsed")
+        ef_status = ec2.selectbox("",["Todos"]+STATUS_OPCOES,key="ef_status", label_visibility="collapsed")
+        ef_conc   = ec3.checkbox("✅",value=False,key="ef_conc", help="Mostrar concluídas")
 
-        fd1,fd2,fd3 = st.columns(3)
-        novo_inicio  = fd1.date_input("Início",  value=parse_date(t.get("inicio_previsto")),  key=f"ini_{t['id']}",  format="DD/MM/YYYY")
-        novo_entrega = fd2.date_input("Entrega", value=parse_date(t.get("entrega_prevista")), key=f"ent_{t['id']}",  format="DD/MM/YYYY")
-        novo_real    = fd3.date_input("Real",    value=parse_date(t.get("entrega_real")),     key=f"real_{t['id']}", format="DD/MM/YYYY")
+        # nova extra
+        with st.expander("➕ Nova atividade extra"):
+            xe1,xe2 = st.columns(2)
+            x_origem = xe1.text_input("Origem / Contexto *", key="x_origem",
+                placeholder="Ex: Reunião diretoria, Cliente X...")
+            x_status = xe2.selectbox("Status", STATUS_OPCOES, key="x_status")
+            x_desc   = st.text_input("Descrição *", key="x_desc")
+            x_obs    = st.text_area("Observação", key="x_obs", height=50)
 
-        gg1,gg2,gg3,gg4 = st.columns(4)
-        ng = gg1.slider("G",1,5,t.get("gut_gravidade") or 1, key=f"g_{t['id']}")
-        nu = gg2.slider("U",1,5,t.get("gut_urgencia")  or 1, key=f"u_{t['id']}")
-        nt = gg3.slider("T",1,5,t.get("gut_tendencia") or 1, key=f"te_{t['id']}")
-        gg4.metric("GUT", ng*nu*nt)
+            xr1,xr2 = st.columns(2)
+            x_r = xr1.selectbox("Responsável (R)", equipe_nomes, key="x_r")
+            x_a = xr2.selectbox("Aprovador (A)",["—"]+equipe_nomes, key="x_a")
 
-        novo_obs = st.text_area("Obs.", value=t.get("observacoes") or "",
-            key=f"obs_{t['id']}", height=50)
+            xd1,xd2 = st.columns(2)
+            x_inicio  = xd1.date_input("Início", value=None, key="x_ini", format="DD/MM/YYYY")
+            x_entrega = xd2.date_input("Entrega",value=None, key="x_ent", format="DD/MM/YYYY")
 
-        s1,s2 = st.columns([1,5])
-        if s1.button("💾 Salvar", type="primary", key=f"save_{t['id']}"):
-            supabase.table("obras_tarefas").update({
-                "responsavel_id":   equipe_ids.get(r_nome),
-                "aprovador_id":     equipe_ids.get(a_nome) if a_nome != "—" else None,
-                "consultado_id":    equipe_ids.get(c_nome) if c_nome != "—" else None,
-                "informado_id":     equipe_ids.get(i_nome) if i_nome != "—" else None,
-                "status":           novo_status,
-                "impedimento":      novo_imp or None,
-                "avanco_percent":   novo_avanco,
-                "inicio_previsto":  novo_inicio.isoformat()  if novo_inicio  else None,
-                "entrega_prevista": novo_entrega.isoformat() if novo_entrega else None,
-                "entrega_real":     novo_real.isoformat()    if novo_real    else None,
-                "gut_gravidade":    ng,"gut_urgencia":nu,"gut_tendencia":nt,
-                "gut_score":        ng*nu*nt,
-                "observacoes":      novo_obs or None,
-            }).eq("id",t["id"]).execute()
-            limpar_cache()
-            st.success("✅ Salvo!"); st.rerun()
+            xg1,xg2,xg3,xg4 = st.columns(4)
+            x_g = xg1.slider("G",1,5,1,key="x_g")
+            x_u = xg2.slider("U",1,5,1,key="x_u")
+            x_t = xg3.slider("T",1,5,1,key="x_t")
+            xg4.metric("GUT",x_g*x_u*x_t)
+
+            if st.button("💾 Criar extra", type="primary", key="btn_nova_extra"):
+                if x_desc and x_origem:
+                    supabase.table("obras_tarefas").insert({
+                        "obra_id":        None,
+                        "origem":         x_origem,
+                        "descricao":      x_desc,
+                        "observacoes":    x_obs or None,
+                        "responsavel_id": equipe_ids.get(x_r),
+                        "aprovador_id":   equipe_ids.get(x_a) if x_a!="—" else None,
+                        "status":         x_status,
+                        "inicio_previsto":x_inicio.isoformat()  if x_inicio  else None,
+                        "entrega_prevista":x_entrega.isoformat() if x_entrega else None,
+                        "gut_gravidade":  x_g,"gut_urgencia":x_u,"gut_tendencia":x_t,
+                        "gut_score":      x_g*x_u*x_t,"avanco_percent":0,
+                    }).execute()
+                    limpar_cache(); st.success("✅ Extra criada!"); st.rerun()
+                else: st.warning("Origem e Descrição são obrigatórias.")
+
+        # aplica filtros
+        xf = extras
+        if not ef_conc:          xf = [t for t in xf if t["status"] not in ("Concluído","N/A")]
+        if ef_resp   != "Todos": xf = [t for t in xf if (t.get("responsavel") or {}).get("nome") == ef_resp]
+        if ef_status != "Todos": xf = [t for t in xf if t["status"] == ef_status]
+
+        if not xf:
+            st.info("Nenhuma atividade extra." if not extras else "Nenhuma com os filtros.")
+        else:
+            # métricas extras
+            xe_total    = len(xf)
+            xe_atrasadas = sum(1 for t in xf if calcular_farol(t.get("entrega_prevista"), t["status"]) == "🔴")
+            st.caption(f"📌 {xe_total} extra(s) · 🔴 {xe_atrasadas} atrasadas")
+
+            df_ex = montar_df(xf, modo="extras")
+            cols_ex = [c for c in df_ex.columns if c != "_id"]
+            col_cfg_ex = {
+                "GUT":      st.column_config.TextColumn("GUT",    width="small"),
+                "Origem":   st.column_config.TextColumn("Origem", width="medium"),
+                "Descrição":st.column_config.TextColumn("Descrição",width="large"),
+                "Resp.":    st.column_config.TextColumn("Resp.",  width="small"),
+                "Status":   st.column_config.TextColumn("Status", width="small"),
+                "Desvio":   st.column_config.TextColumn("Desvio", width="small"),
+                "Av.%":     st.column_config.ProgressColumn("Av.%",min_value=0,max_value=100,width="small"),
+            }
+            sel_ex = st.dataframe(df_ex[cols_ex], use_container_width=True, hide_index=True,
+                height=min(420, 36+35*len(xf)), on_select="rerun",
+                selection_mode="single-row", column_config=col_cfg_ex)
+
+            linhas_ex = sel_ex.selection.rows if sel_ex.selection else []
+            if linhas_ex:
+                t = xf[linhas_ex[0]]
+                st.divider()
+                st.caption(f"✏️ **{t.get('descricao','')}** — {t.get('origem','')}")
+                form_edicao(t, equipe_nomes, equipe_ids, suffix="_ex")
