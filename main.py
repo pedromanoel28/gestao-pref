@@ -159,13 +159,14 @@ if pagina_selecionada == "📥 Importador de Arquivos":
 
     st.info("""
     **Ordem obrigatória:**
-    FASE 1 → Equipe, Obras, Template Jornada, Rotinas  
-    FASE 2 → Extras, Tarefas  
+    FASE 1 → Equipe, Obras, Template Jornada, Rotinas
+    FASE 2 → Extras, Tarefas
     FASE 3 → Fabricação, Transporte, Montagem, Custos
+    FASE 4 → Notas Fiscais / Medições, Resumo Financeiro Obras
     """)
 
     st.warning("""
-    ⚠️ **Use somente os CSVs padronizados** (arquivos `IMPORT_*.csv`).  
+    ⚠️ **Use somente os CSVs padronizados** (arquivos `IMPORT_*.csv`).
     Eles têm os títulos exatos que o sistema espera. Copie seus dados para dentro deles.
     """)
 
@@ -180,6 +181,8 @@ if pagina_selecionada == "📥 Importador de Arquivos":
         "8. [FASE 3] Transporte              → 8_IMPORT_transporte.csv",
         "9. [FASE 3] Montagem                → 9_IMPORT_montagem.csv",
         "10.[FASE 3] Custos / Financeiro     → 10_IMPORT_custos.csv",
+        "11.[FASE 4] Notas Fiscais / Medições  → Lista_Medição.csv",
+        "12.[FASE 4] Resumo Financeiro Obras   → Civil_Comercial_Estruturas_Custos_Obras.csv",
     ])
     rota = opcao.strip()[0:2].strip().rstrip(".")
 
@@ -328,6 +331,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             if ignorados: st.warning(f"⚠️ {ignorados} linha(s) ignorada(s): obra não encontrada.")
 
                         # ── ROTA 10: CUSTOS ──────────────────────────────────
+                        # (mantido abaixo; rotas 11 e 12 adicionadas ao final)
                         # CSV já vem pré-processado (datas e números convertidos)
                         elif rota == "10":
                             mob = mapa_obras()
@@ -358,6 +362,121 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             total = enviar_lotes("custos", pacote_limpo, "Enviando custos...")
                             st.success(f"🎉 {total} registros importados!")
                             st.info(f"✅ {com_obra} custos diretos (com obra) | 🏭 {sem_obra} custos indiretos (sem obra)")
+
+                        # ── ROTA 11: NOTAS FISCAIS / MEDIÇÕES ────────────────
+                        # Fonte: Lista_Medição.csv — colunas mapeadas por posição
+                        elif rota == "11":
+                            arquivo.seek(0)
+                            df11 = pd.read_csv(arquivo, sep=None, engine="python",
+                                               encoding="utf-8-sig", dtype=str, header=0)
+
+                            # Mapear por posição (ignora acentos/variações de nome)
+                            nomes11 = [
+                                "codigo_obra_original", "titulo", "etapa_obra",
+                                "data_acao", "nome_pagador", "cnpj_pagador",
+                                "numero_nf", "numero_nf_remessa", "data_vencimento",
+                                "descricao", "valor", "cnpj_recebedor",
+                                "razao_social_recebedor", "tipo", "observacoes", "categoria",
+                            ]
+                            rename11 = {df11.columns[i]: nomes11[i]
+                                        for i in range(min(len(df11.columns), len(nomes11)))}
+                            df11 = df11.rename(columns=rename11)
+
+                            # Ignorar NFs canceladas
+                            mask_cancel = (df11["tipo"].str.strip().str.upper()
+                                           == "NOTA FISCAL CANCELADA")
+                            n_canceladas = int(mask_cancel.sum())
+                            df11 = df11[~mask_cancel].copy()
+
+                            # Converter datas (DD/MM/YYYY → YYYY-MM-DD)
+                            df11["data_acao"]       = formatar_data(df11["data_acao"])
+                            df11["data_vencimento"] = formatar_data(df11["data_vencimento"])
+
+                            # Limpar valor monetário
+                            df11["valor"] = formatar_numero(df11["valor"])
+
+                            # Extrair obra_id via código 4 dígitos na coluna titulo
+                            mob = mapa_obras()
+                            df11["obra_id"] = aplicar_obra_id(
+                                df11["titulo"].apply(extrair_codigo), mob)
+                            sem_obra = int(df11["obra_id"].isna().sum())
+
+                            df11 = nulos(df11)
+
+                            cols_bd11 = [
+                                "codigo_obra_original", "titulo", "etapa_obra",
+                                "data_acao", "nome_pagador", "cnpj_pagador",
+                                "numero_nf", "numero_nf_remessa", "data_vencimento",
+                                "descricao", "valor", "cnpj_recebedor",
+                                "razao_social_recebedor", "tipo", "observacoes",
+                                "categoria", "obra_id",
+                            ]
+                            cols_bd11 = [c for c in cols_bd11 if c in df11.columns]
+                            pacote11 = df11[cols_bd11].to_dict("records")
+                            pacote11 = fix_ids(pacote11)
+                            total11 = enviar_lotes("notas_fiscais", pacote11,
+                                                   "Enviando notas fiscais...")
+                            st.success(f"🎉 {total11} NFs importadas!")
+                            st.info(
+                                f"✅ {total11 - sem_obra} com obra vinculada  "
+                                f"| ⚠️ {sem_obra} sem obra  "
+                                f"| 🚫 {n_canceladas} canceladas ignoradas")
+
+                        # ── ROTA 12: RESUMO FINANCEIRO OBRAS ─────────────────
+                        # Fonte: Civil_Comercial_Estruturas_Custos_Obras.csv
+                        elif rota == "12":
+                            arquivo.seek(0)
+                            df12 = pd.read_csv(arquivo, sep=None, engine="python",
+                                               encoding="utf-8-sig", dtype=str, header=0)
+
+                            nomes12 = [
+                                "data_contrato", "codigo_produto", "obra_nome",
+                                "volume", "faturamento_total", "faturamento_civil",
+                                "faturamento_direto", "custo_total", "despesas_indiretas",
+                                "impostos", "lucro", "cimento_cliente_ton", "cimento_civil_ton",
+                                "chave_coligada", "razao_social", "cnpj", "responsavel",
+                                "email", "volume_projeto", "concreto", "aco_estrutural",
+                                "formas", "mo_producao", "eps", "estuque", "projetos",
+                                "descida_agua", "insertos", "consoles", "investimentos",
+                                "neoprene", "materiais_consumo", "equip_fab",
+                                "custos_indiretos", "pecas_consorcio", "frete",
+                                "equip_montagem", "mo_montagem", "despesas_equipe",
+                                "topografia", "mobilizacao", "equip_aux_montagem",
+                                "outros", "eventuais", "despesas_comerciais",
+                            ]
+                            rename12 = {df12.columns[i]: nomes12[i]
+                                        for i in range(min(len(df12.columns), len(nomes12)))}
+                            df12 = df12.rename(columns=rename12)
+
+                            # Converter data
+                            df12["data_contrato"] = formatar_data(df12["data_contrato"])
+
+                            # Colunas não-numéricas (texto puro)
+                            texto12 = {"data_contrato", "codigo_produto", "obra_nome",
+                                       "chave_coligada", "razao_social", "cnpj",
+                                       "responsavel", "email"}
+                            num_cols12 = [c for c in nomes12
+                                          if c not in texto12 and c in df12.columns]
+                            for c in num_cols12:
+                                df12[c] = formatar_numero(df12[c])
+
+                            # Extrair obra_id da coluna obra_nome
+                            mob = mapa_obras()
+                            df12["obra_id"] = aplicar_obra_id(
+                                df12["obra_nome"].apply(extrair_codigo), mob)
+                            sem_obra12 = int(df12["obra_id"].isna().sum())
+
+                            df12 = nulos(df12)
+
+                            cols_bd12 = nomes12 + ["obra_id"]
+                            cols_bd12 = [c for c in cols_bd12 if c in df12.columns]
+                            pacote12 = df12[cols_bd12].to_dict("records")
+                            pacote12 = fix_ids(pacote12)
+                            supabase.table("obras_financeiro").insert(pacote12).execute()
+                            st.success(f"🎉 {len(pacote12)} registros importados em obras_financeiro!")
+                            st.info(
+                                f"✅ {len(pacote12) - sem_obra12} com obra vinculada  "
+                                f"| ⚠️ {sem_obra12} sem obra")
 
                     except Exception as e:
                         st.error(f"❌ Erro no banco: {e}")
