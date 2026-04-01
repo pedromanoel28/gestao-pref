@@ -140,6 +140,22 @@ def mapa_equipe():
     dados = supabase.table("equipe").select("id, nome").execute().data
     return {normalize(e["nome"]): e["id"] for e in dados}
 
+def limpar_nan_pacote(pacote):
+    """Remove NaN/Inf/None residuais de um pacote pronto para insert.
+    Garante que nenhum float NaN chegue ao JSON do Supabase."""
+    import math as _m
+    limpo = []
+    for row in pacote:
+        limpo.append({
+            k: None if (
+                v is None
+                or (isinstance(v, float) and (_m.isnan(v) or _m.isinf(v)))
+                or str(v).strip().lower() in ("nan", "nat", "none", "inf", "")
+            ) else v
+            for k, v in row.items()
+        })
+    return limpo
+
 def enviar_lotes(tabela, pacote, barra_label="Enviando..."):
     """Envia em lotes de 500 com barra de progresso."""
     total = len(pacote)
@@ -370,7 +386,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             df11 = pd.read_csv(arquivo, sep=None, engine="python",
                                                encoding="utf-8-sig", dtype=str, header=0)
 
-                            # Mapear por posição (ignora acentos/variações de nome)
+                            # Renomear por posição — imune a acentos no cabeçalho
                             nomes11 = [
                                 "codigo_obra_original", "titulo", "etapa_obra",
                                 "data_acao", "nome_pagador", "cnpj_pagador",
@@ -378,48 +394,49 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                                 "descricao", "valor", "cnpj_recebedor",
                                 "razao_social_recebedor", "tipo", "observacoes", "categoria",
                             ]
-                            rename11 = {df11.columns[i]: nomes11[i]
-                                        for i in range(min(len(df11.columns), len(nomes11)))}
-                            df11 = df11.rename(columns=rename11)
+                            df11 = df11.rename(columns={
+                                df11.columns[i]: nomes11[i]
+                                for i in range(min(len(df11.columns), len(nomes11)))
+                            })
 
-                            # Ignorar NFs canceladas
+                            # Ignorar NFs canceladas antes de qualquer processamento
                             mask_cancel = (df11["tipo"].str.strip().str.upper()
                                            == "NOTA FISCAL CANCELADA")
                             n_canceladas = int(mask_cancel.sum())
                             df11 = df11[~mask_cancel].copy()
 
-                            # Converter datas (DD/MM/YYYY → YYYY-MM-DD)
+                            # Converter datas DD/MM/YYYY → YYYY-MM-DD
                             df11["data_acao"]       = formatar_data(df11["data_acao"])
                             df11["data_vencimento"] = formatar_data(df11["data_vencimento"])
 
-                            # Limpar valor monetário
+                            # Limpar valor monetário → float ou None
                             df11["valor"] = formatar_numero(df11["valor"])
 
-                            # Extrair obra_id via código 4 dígitos na coluna titulo
+                            # obra_id via código 4 dígitos na coluna titulo (pode ser NULL)
                             mob = mapa_obras()
                             df11["obra_id"] = aplicar_obra_id(
                                 df11["titulo"].apply(extrair_codigo), mob)
-                            sem_obra = int(df11["obra_id"].isna().sum())
+                            sem_obra11 = int(df11["obra_id"].isna().sum())
 
-                            df11 = nulos(df11)
-
+                            # Colunas que existem no banco (schema notas_fiscais)
                             cols_bd11 = [
-                                "codigo_obra_original", "titulo", "etapa_obra",
-                                "data_acao", "nome_pagador", "cnpj_pagador",
-                                "numero_nf", "numero_nf_remessa", "data_vencimento",
-                                "descricao", "valor", "cnpj_recebedor",
-                                "razao_social_recebedor", "tipo", "observacoes",
-                                "categoria", "obra_id",
+                                "obra_id", "codigo_obra_original", "titulo",
+                                "etapa_obra", "data_acao", "nome_pagador",
+                                "cnpj_pagador", "numero_nf", "numero_nf_remessa",
+                                "data_vencimento", "descricao", "valor",
+                                "cnpj_recebedor", "razao_social_recebedor",
+                                "tipo", "observacoes", "categoria",
                             ]
                             cols_bd11 = [c for c in cols_bd11 if c in df11.columns]
                             pacote11 = df11[cols_bd11].to_dict("records")
                             pacote11 = fix_ids(pacote11)
+                            pacote11 = limpar_nan_pacote(pacote11)  # ← purga NaN residuais
                             total11 = enviar_lotes("notas_fiscais", pacote11,
                                                    "Enviando notas fiscais...")
                             st.success(f"🎉 {total11} NFs importadas!")
                             st.info(
-                                f"✅ {total11 - sem_obra} com obra vinculada  "
-                                f"| ⚠️ {sem_obra} sem obra  "
+                                f"✅ {total11 - sem_obra11} com obra vinculada  "
+                                f"| ⚠️ {sem_obra11} sem obra  "
                                 f"| 🚫 {n_canceladas} canceladas ignoradas")
 
                         # ── ROTA 12: RESUMO FINANCEIRO OBRAS ─────────────────
@@ -429,6 +446,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             df12 = pd.read_csv(arquivo, sep=None, engine="python",
                                                encoding="utf-8-sig", dtype=str, header=0)
 
+                            # Renomear por posição
                             nomes12 = [
                                 "data_contrato", "codigo_produto", "obra_nome",
                                 "volume", "faturamento_total", "faturamento_civil",
@@ -444,36 +462,51 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                                 "topografia", "mobilizacao", "equip_aux_montagem",
                                 "outros", "eventuais", "despesas_comerciais",
                             ]
-                            rename12 = {df12.columns[i]: nomes12[i]
-                                        for i in range(min(len(df12.columns), len(nomes12)))}
-                            df12 = df12.rename(columns=rename12)
+                            df12 = df12.rename(columns={
+                                df12.columns[i]: nomes12[i]
+                                for i in range(min(len(df12.columns), len(nomes12)))
+                            })
 
                             # Converter data
                             df12["data_contrato"] = formatar_data(df12["data_contrato"])
 
-                            # Colunas não-numéricas (texto puro)
+                            # Limpar todos os campos numéricos
                             texto12 = {"data_contrato", "codigo_produto", "obra_nome",
                                        "chave_coligada", "razao_social", "cnpj",
                                        "responsavel", "email"}
-                            num_cols12 = [c for c in nomes12
-                                          if c not in texto12 and c in df12.columns]
-                            for c in num_cols12:
+                            for c in [col for col in nomes12
+                                      if col not in texto12 and col in df12.columns]:
                                 df12[c] = formatar_numero(df12[c])
 
-                            # Extrair obra_id da coluna obra_nome
+                            # obra_id via código 4 dígitos em obra_nome (pode ser NULL)
                             mob = mapa_obras()
                             df12["obra_id"] = aplicar_obra_id(
                                 df12["obra_nome"].apply(extrair_codigo), mob)
                             sem_obra12 = int(df12["obra_id"].isna().sum())
 
-                            df12 = nulos(df12)
-
-                            cols_bd12 = nomes12 + ["obra_id"]
+                            # Somente colunas que existem no schema obras_financeiro
+                            cols_bd12 = [
+                                "obra_id", "data_contrato", "codigo_produto", "obra_nome",
+                                "chave_coligada", "razao_social", "cnpj", "responsavel",
+                                "email", "volume", "volume_projeto", "faturamento_total",
+                                "faturamento_civil", "faturamento_direto", "custo_total",
+                                "despesas_indiretas", "impostos", "lucro", "concreto",
+                                "aco_estrutural", "formas", "mo_producao", "eps", "estuque",
+                                "projetos", "descida_agua", "insertos", "consoles",
+                                "investimentos", "neoprene", "materiais_consumo", "equip_fab",
+                                "custos_indiretos", "pecas_consorcio", "frete",
+                                "equip_montagem", "mo_montagem", "despesas_equipe",
+                                "topografia", "mobilizacao", "equip_aux_montagem",
+                                "outros", "eventuais", "despesas_comerciais",
+                                "cimento_cliente_ton", "cimento_civil_ton",
+                            ]
                             cols_bd12 = [c for c in cols_bd12 if c in df12.columns]
                             pacote12 = df12[cols_bd12].to_dict("records")
                             pacote12 = fix_ids(pacote12)
+                            pacote12 = limpar_nan_pacote(pacote12)  # ← purga NaN residuais
                             supabase.table("obras_financeiro").insert(pacote12).execute()
-                            st.success(f"🎉 {len(pacote12)} registros importados em obras_financeiro!")
+                            st.success(
+                                f"🎉 {len(pacote12)} registros importados em obras_financeiro!")
                             st.info(
                                 f"✅ {len(pacote12) - sem_obra12} com obra vinculada  "
                                 f"| ⚠️ {sem_obra12} sem obra")
