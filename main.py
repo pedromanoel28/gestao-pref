@@ -369,8 +369,12 @@ if pagina_selecionada == "📥 Importador de Arquivos":
 # ==========================================================
 elif pagina_selecionada == "👥 Equipe":
     st.header("👥 Gestão da Equipe")
-    resp = supabase.table("equipe").select("*").order("nome").execute()
-    df_eq = pd.DataFrame(resp.data)
+
+    @st.cache_data(ttl=60)
+    def _carregar_equipe_completa():
+        return supabase.table("equipe").select("*").order("nome").execute().data
+
+    df_eq = pd.DataFrame(_carregar_equipe_completa())
     aba1, aba2 = st.tabs(["👁️ Editar", "➕ Novo"])
 
     with aba1:
@@ -384,6 +388,8 @@ elif pagina_selecionada == "👥 Equipe":
                     supabase.table("equipe").delete().eq("id", df_eq.iloc[i]["id"]).execute()
                 for i, ed in m.get("edited_rows", {}).items():
                     supabase.table("equipe").update(ed).eq("id", df_eq.iloc[i]["id"]).execute()
+                _carregar_equipe_completa.clear()
+                carregar_equipe_ativa.clear()
                 st.success("Salvo!"); st.rerun()
         else:
             st.warning("Nenhum colaborador.")
@@ -400,6 +406,8 @@ elif pagina_selecionada == "👥 Equipe":
             if st.form_submit_button("💾 Cadastrar", type="primary") and nome:
                 supabase.table("equipe").insert({"nome":nome,"email":email,
                                                   "setor":setor,"status":status}).execute()
+                _carregar_equipe_completa.clear()
+                carregar_equipe_ativa.clear()
                 st.rerun()
 
 # ==========================================================
@@ -424,7 +432,12 @@ def carregar_template():
 @st.cache_data(ttl=60)
 def carregar_tarefas(obra_id):
     resp = supabase.table("obras_tarefas")\
-        .select("*, responsavel:equipe!obras_tarefas_responsavel_id_fkey(nome), aprovador:equipe!obras_tarefas_aprovador_id_fkey(nome)")\
+        .select("id, item, etapa, descricao, status, observacoes, impedimento, "
+                "avanco_percent, inicio_previsto, entrega_prevista, entrega_real, "
+                "gut_gravidade, gut_urgencia, gut_tendencia, gut_score, "
+                "responsavel_id, aprovador_id, consultado_id, informado_id, "
+                "responsavel:equipe!obras_tarefas_responsavel_id_fkey(nome), "
+                "aprovador:equipe!obras_tarefas_aprovador_id_fkey(nome)")\
         .eq("obra_id", obra_id)\
         .execute()
     return resp.data
@@ -444,25 +457,27 @@ def carregar_alertas():
         return resp.data
     except: return []
 
-def calcular_farol(entrega_prevista, status):
+from datetime import date as _date_cls
+
+def calcular_farol(entrega_prevista, status, _hoje=None):
     if status in ("Concluído","N/A"): return "✅"
     if not entrega_prevista: return "⚪"
-    from datetime import date
-    try: diff = (date.fromisoformat(str(entrega_prevista)) - date.today()).days
+    hoje = _hoje or _date_cls.today()
+    try: diff = (_date_cls.fromisoformat(str(entrega_prevista)) - hoje).days
     except: return "⚪"
     return "🔴" if diff < 0 else ("🟡" if diff <= 2 else "🟢")
 
-def calcular_desvio(entrega_prevista, entrega_real, status):
+def calcular_desvio(entrega_prevista, entrega_real, status, _hoje=None):
     if not entrega_prevista: return "—"
-    from datetime import date
-    try: prev = date.fromisoformat(str(entrega_prevista))
+    try: prev = _date_cls.fromisoformat(str(entrega_prevista))
     except: return "—"
     if entrega_real:
-        try: diff = (date.fromisoformat(str(entrega_real)) - prev).days
+        try: diff = (_date_cls.fromisoformat(str(entrega_real)) - prev).days
         except: return "—"
     else:
         if status in ("Concluído","N/A"): return "—"
-        diff = (date.today() - prev).days
+        hoje = _hoje or _date_cls.today()
+        diff = (hoje - prev).days
     if diff == 0: return "✅ 0d"
     return f"🔴 +{diff}d" if diff > 0 else f"🟢 {diff}d"
 
@@ -479,12 +494,45 @@ def parse_date(val):
         return date.fromisoformat(str(val))
     except: return None
 
+@st.cache_data(ttl=120)
+def carregar_ultimo_update():
+    """Busca o último created_at por obra sem varrer toda a tabela.
+    Limit de 1000 cobre até ~100 obras com folga e é ordens de grandeza
+    mais rápido do que trazer todos os registros."""
+    try:
+        upd = supabase.table("obras_tarefas").select("obra_id, created_at")\
+            .order("created_at", desc=True).limit(1000).execute().data
+        resultado = {}
+        for u in upd:
+            oid = u["obra_id"]
+            if oid not in resultado:
+                resultado[oid] = u.get("created_at", "")[:10]
+        return resultado
+    except:
+        return {}
+
+@st.cache_data(ttl=60)
+def carregar_tarefas_colab(colab_id):
+    """Busca todas as tarefas onde o colaborador aparece em qualquer papel RACI."""
+    resp = supabase.table("obras_tarefas")\
+        .select("id, item, etapa, descricao, status, observacoes, impedimento, "
+                "avanco_percent, inicio_previsto, entrega_prevista, entrega_real, "
+                "gut_gravidade, gut_urgencia, gut_tendencia, gut_score, obra_id, origem, "
+                "responsavel_id, aprovador_id, consultado_id, informado_id, "
+                "obras(nome, codigo)")\
+        .or_(f"responsavel_id.eq.{colab_id},aprovador_id.eq.{colab_id},"
+             f"consultado_id.eq.{colab_id},informado_id.eq.{colab_id}")\
+        .execute()
+    return resp.data
+
 def limpar_cache():
     carregar_obras_ativas.clear()
     carregar_equipe_ativa.clear()
     carregar_template.clear()
     carregar_tarefas.clear()
     carregar_alertas.clear()
+    carregar_ultimo_update.clear()
+    carregar_tarefas_colab.clear()
 
 # ==========================================================
 # PÁGINA: GESTÃO DE OBRAS (SÚMULA)
@@ -530,14 +578,7 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
         else [o for o in obras if o.get("status") == filtro_status_obra]
     if not obras_filtradas: st.warning("Nenhuma obra."); st.stop()
 
-    try:
-        upd = supabase.table("obras_tarefas").select("obra_id, created_at")\
-            .order("created_at", desc=True).execute().data
-        ultimo_upd = {}
-        for u in upd:
-            if u["obra_id"] not in ultimo_upd:
-                ultimo_upd[u["obra_id"]] = u.get("created_at","")[:10]
-    except: ultimo_upd = {}
+    ultimo_upd = carregar_ultimo_update()
 
     def label_obra(o):
         upd_str = ultimo_upd.get(o["id"])
@@ -664,16 +705,17 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
     elif "Baixo" in f_gut:  tf = [t for t in tf if (t.get("gut_score") or 1) < 27]
 
     # ── MONTA DATAFRAME ───────────────────────────────────
+    _hoje = date.today()   # calculado uma única vez para todo o loop
     rows = []
     for t in tf:
         rows.append({
             "_id":        t["id"],
             "GUT":        gut_emoji(t.get("gut_score") or 1),
             "Etapa":      t.get("etapa") or "—",
-            "Descrição":  f"{calcular_farol(t.get('entrega_prevista'), t['status'])} {t.get('descricao') or '—'}",
+            "Descrição":  f"{calcular_farol(t.get('entrega_prevista'), t['status'], _hoje)} {t.get('descricao') or '—'}",
             "Resp.":      (t.get("responsavel") or {}).get("nome","—"),
             "Status":     t["status"],
-            "Desvio":     calcular_desvio(t.get("entrega_prevista"), t.get("entrega_real"), t["status"]),
+            "Desvio":     calcular_desvio(t.get("entrega_prevista"), t.get("entrega_real"), t["status"], _hoje),
             "Av.%":       t.get("avanco_percent") or 0,
         })
 
@@ -760,3 +802,527 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
             }).eq("id",t["id"]).execute()
             limpar_cache()
             st.success("✅ Salvo!"); st.rerun()
+
+# ==========================================================
+# PÁGINA: REUNIÃO 1:1
+# ==========================================================
+elif pagina_selecionada == "👤 Reunião 1:1":
+    from datetime import date
+
+    STATUS_OPCOES = ["A Iniciar","Em Andamento","Impedido","Concluído","N/A"]
+
+    st.header("👤 Reunião 1:1")
+
+    equipe_lista = carregar_equipe_ativa()
+    if not equipe_lista:
+        st.error("Nenhum colaborador ativo cadastrado."); st.stop()
+
+    equipe_nomes = [e["nome"] for e in equipe_lista]
+    equipe_ids   = {e["nome"]: e["id"] for e in equipe_lista}
+
+    # ── SELEÇÃO DE COLABORADOR ─────────────────────────────
+    c1, c2 = st.columns([4, 1])
+    colab_nome = c1.selectbox("Colaborador", equipe_nomes,
+                               key="sel_colab_1on1", label_visibility="collapsed")
+    colab_id = equipe_ids[colab_nome]
+
+    if c2.button("🔄 Atualizar", key="btn_refresh_1on1"):
+        carregar_tarefas_colab.clear(); st.rerun()
+
+    # ── CARREGA TAREFAS ────────────────────────────────────
+    hoje    = date.today()
+    tarefas = carregar_tarefas_colab(colab_id)
+
+    # Anota papel e nome da obra em cada tarefa
+    for t in tarefas:
+        papeis = []
+        if t.get("responsavel_id") == colab_id: papeis.append("R")
+        if t.get("aprovador_id")   == colab_id: papeis.append("A")
+        if t.get("consultado_id")  == colab_id: papeis.append("C")
+        if t.get("informado_id")   == colab_id: papeis.append("I")
+        t["_papel"]      = "/".join(papeis) or "?"
+        t["_obra_nome"]  = (t.get("obras") or {}).get("nome") or "— Extra —"
+
+    # ── MÉTRICAS ───────────────────────────────────────────
+    hoje_iso    = hoje.isoformat()
+    concluidas  = [t for t in tarefas if t["status"] == "Concluído"]
+    otd_ok      = [t for t in concluidas
+                   if t.get("entrega_real") and t.get("entrega_prevista")
+                   and t["entrega_real"] <= t["entrega_prevista"]]
+    otd_pct     = int(len(otd_ok) / len(concluidas) * 100) if concluidas else 0
+    pendentes_n = sum(1 for t in tarefas if t["status"] not in ("Concluído","N/A"))
+    atrasadas_n = sum(1 for t in tarefas
+                      if t["status"] not in ("Concluído","N/A")
+                      and t.get("entrega_prevista","") < hoje_iso
+                      and t.get("entrega_prevista"))
+    impedidas_n = sum(1 for t in tarefas if t["status"] == "Impedido")
+
+    m1,m2,m3,m4,m5 = st.columns(5)
+    m1.metric("📋 RACI total",  len(tarefas))
+    m2.metric("⏳ Pendentes",   pendentes_n)
+    m3.metric("🔴 Atrasadas",   atrasadas_n)
+    m4.metric("🚧 Impedidas",   impedidas_n)
+    m5.metric("📦 OTD",         f"{otd_pct}%",
+              help="On-Time Delivery — tarefas concluídas dentro do prazo")
+
+    st.divider()
+
+    aba_tarefas, aba_extras, aba_email = st.tabs(
+        ["📋 Tarefas RACI", "➕ Nova Extra", "📧 E-mail de Cobrança"])
+
+    # ── ABA 1: TAREFAS RACI ────────────────────────────────
+    with aba_tarefas:
+        fc1, fc2 = st.columns([2, 2])
+        f_papel  = fc1.selectbox("Papel",   ["Todos","R","A","C","I"],
+                                  key="f_papel_1on1", label_visibility="collapsed")
+        f_status = fc2.selectbox("Status",  ["Ativos"] + STATUS_OPCOES,
+                                  key="f_status_1on1", label_visibility="collapsed")
+
+        tf = list(tarefas)
+        if f_papel  != "Todos":  tf = [t for t in tf if f_papel in t["_papel"]]
+        if f_status == "Ativos": tf = [t for t in tf if t["status"] not in ("Concluído","N/A")]
+        elif f_status != "Todos": tf = [t for t in tf if t["status"] == f_status]
+
+        # Ordena: GUT desc, prazo asc
+        tf = sorted(tf, key=lambda t: (-(t.get("gut_score") or 1),
+                                        t.get("entrega_prevista") or "9999-99-99"))
+
+        if not tf:
+            st.info("Nenhuma tarefa para os filtros selecionados.")
+        else:
+            rows_1on1 = []
+            for t in tf:
+                farol = calcular_farol(t.get("entrega_prevista"), t["status"], hoje)
+                rows_1on1.append({
+                    "_id":       t["id"],
+                    "Papel":     t["_papel"],
+                    "GUT":       gut_emoji(t.get("gut_score") or 1),
+                    "Obra":      t["_obra_nome"],
+                    "Etapa":     t.get("etapa") or "—",
+                    "Descrição": f"{farol} {t.get('descricao') or '—'}",
+                    "Status":    t["status"],
+                    "Desvio":    calcular_desvio(t.get("entrega_prevista"),
+                                                  t.get("entrega_real"), t["status"], hoje),
+                    "Av.%":      t.get("avanco_percent") or 0,
+                })
+
+            df_1on1 = pd.DataFrame(rows_1on1)
+            st.caption(f"**{len(df_1on1)}** tarefa(s) · clique em uma linha para editar")
+
+            sel_1on1 = st.dataframe(
+                df_1on1.drop(columns=["_id"]),
+                use_container_width=True,
+                hide_index=True,
+                height=min(420, 36 + 35 * len(df_1on1)),
+                on_select="rerun",
+                selection_mode="single-row",
+                column_config={
+                    "Papel":     st.column_config.TextColumn("Papel",    width="small"),
+                    "GUT":       st.column_config.TextColumn("GUT",      width="small"),
+                    "Obra":      st.column_config.TextColumn("Obra",     width="medium"),
+                    "Etapa":     st.column_config.TextColumn("Etapa",    width="medium"),
+                    "Descrição": st.column_config.TextColumn("Descrição",width="large"),
+                    "Status":    st.column_config.TextColumn("Status",   width="medium"),
+                    "Desvio":    st.column_config.TextColumn("Desvio",   width="small"),
+                    "Av.%":      st.column_config.ProgressColumn("Av.%",
+                                     min_value=0, max_value=100, width="small"),
+                }
+            )
+
+            # ── FORMULÁRIO DE EDIÇÃO INLINE ───────────────────────
+            linhas_sel = sel_1on1.selection.rows if sel_1on1.selection else []
+            if linhas_sel:
+                t = tf[linhas_sel[0]]
+                st.divider()
+                st.markdown(f"**✏️ {t['_obra_nome']}** · {t.get('etapa') or '—'} · {t.get('descricao','')}")
+
+                ea, eb = st.columns(2)
+                novo_status = ea.selectbox("Status", STATUS_OPCOES,
+                    index=STATUS_OPCOES.index(t["status"]) if t["status"] in STATUS_OPCOES else 0,
+                    key=f"1on1_st_{t['id']}")
+                novo_avanco = eb.slider("% Avanço", 0, 100,
+                    t.get("avanco_percent") or 0, step=5, key=f"1on1_av_{t['id']}")
+
+                novo_imp = t.get("impedimento") or ""
+                if novo_status == "Impedido":
+                    novo_imp = st.text_input("🚧 Impedimento", value=novo_imp,
+                                              key=f"1on1_imp_{t['id']}")
+
+                fd1, fd2 = st.columns(2)
+                novo_entrega = fd1.date_input("Entrega prevista",
+                    value=parse_date(t.get("entrega_prevista")),
+                    key=f"1on1_ent_{t['id']}", format="DD/MM/YYYY")
+                novo_real = fd2.date_input("Entrega real",
+                    value=parse_date(t.get("entrega_real")),
+                    key=f"1on1_real_{t['id']}", format="DD/MM/YYYY")
+
+                novo_obs = st.text_area("Obs.", value=t.get("observacoes") or "",
+                    key=f"1on1_obs_{t['id']}", height=60)
+
+                if st.button("💾 Salvar", type="primary", key=f"1on1_save_{t['id']}"):
+                    supabase.table("obras_tarefas").update({
+                        "status":           novo_status,
+                        "impedimento":      novo_imp or None,
+                        "avanco_percent":   novo_avanco,
+                        "entrega_prevista": novo_entrega.isoformat() if novo_entrega else None,
+                        "entrega_real":     novo_real.isoformat()    if novo_real    else None,
+                        "observacoes":      novo_obs or None,
+                    }).eq("id", t["id"]).execute()
+                    limpar_cache(); st.success("✅ Salvo!"); st.rerun()
+
+    # ── ABA 2: NOVA EXTRA ──────────────────────────────────
+    with aba_extras:
+        st.markdown(f"**Nova tarefa extra para {colab_nome}** _(obra_id = NULL)_")
+        with st.form("nova_extra_1on1", clear_on_submit=True):
+            ex1, ex2 = st.columns(2)
+            ex_origem = ex1.text_input("Origem / Contexto",
+                                        placeholder="Ex: Reunião semanal, Demanda direta")
+            ex_status = ex2.selectbox("Status inicial", STATUS_OPCOES)
+            ex_desc   = st.text_input("Descrição *")
+            ex_obs    = st.text_area("Observação", height=60)
+
+            ed1, ed2 = st.columns(2)
+            ex_prazo   = ed1.date_input("Prazo previsto", value=None, format="DD/MM/YYYY")
+            ex_entrega = ed2.date_input("Entrega real",   value=None, format="DD/MM/YYYY")
+
+            eg1, eg2, eg3, eg4 = st.columns(4)
+            ex_g = eg1.slider("G", 1, 5, 1, key="ex_g_1on1")
+            ex_u = eg2.slider("U", 1, 5, 1, key="ex_u_1on1")
+            ex_t = eg3.slider("T", 1, 5, 1, key="ex_t_1on1")
+            eg4.metric("GUT", ex_g * ex_u * ex_t)
+
+            if st.form_submit_button("💾 Criar Extra", type="primary"):
+                if ex_desc:
+                    supabase.table("obras_tarefas").insert({
+                        "obra_id":          None,
+                        "origem":           ex_origem or None,
+                        "descricao":        ex_desc,
+                        "observacoes":      ex_obs or None,
+                        "responsavel_id":   colab_id,
+                        "status":           ex_status,
+                        "entrega_prevista": ex_prazo.isoformat()   if ex_prazo   else None,
+                        "entrega_real":     ex_entrega.isoformat() if ex_entrega else None,
+                        "gut_gravidade":    ex_g, "gut_urgencia": ex_u, "gut_tendencia": ex_t,
+                        "gut_score":        ex_g * ex_u * ex_t,
+                        "avanco_percent":   0,
+                    }).execute()
+                    limpar_cache(); st.success(f"✅ Extra criada para {colab_nome}!"); st.rerun()
+                else:
+                    st.warning("Descrição é obrigatória.")
+
+    # ── ABA 3: E-MAIL DE COBRANÇA ──────────────────────────
+    with aba_email:
+        st.markdown(f"### 📧 Cobrança para {colab_nome}")
+
+        pendentes_email = [t for t in tarefas if t["status"] not in ("Concluído","N/A")]
+        pendentes_email = sorted(pendentes_email,
+            key=lambda t: (-(t.get("gut_score") or 1),
+                            t.get("entrega_prevista") or "9999-99-99"))
+
+        if not pendentes_email:
+            st.info("Nenhuma tarefa pendente — sem necessidade de cobrança!")
+        else:
+            atrasadas_e, urgentes_e, andamento_e = [], [], []
+            for t in pendentes_email:
+                farol = calcular_farol(t.get("entrega_prevista"), t["status"], hoje)
+                linha = (t["_papel"], t["_obra_nome"],
+                         t.get("descricao","—"),
+                         t.get("entrega_prevista") or "sem prazo")
+                if farol == "🔴":   atrasadas_e.append(linha)
+                elif farol == "🟡": urgentes_e.append(linha)
+                else:               andamento_e.append(linha)
+
+            linhas = [f"Olá, {colab_nome}!\n",
+                      "Segue o resumo das suas tarefas em aberto:\n"]
+
+            if atrasadas_e:
+                linhas.append("🔴 ATRASADAS:")
+                for papel, obra, desc, prazo in atrasadas_e:
+                    linhas.append(f"  • [{papel}] {obra} — {desc}  (prazo: {prazo})")
+
+            if urgentes_e:
+                linhas.append("\n🟡 VENCENDO EM BREVE:")
+                for papel, obra, desc, prazo in urgentes_e:
+                    linhas.append(f"  • [{papel}] {obra} — {desc}  (prazo: {prazo})")
+
+            if andamento_e:
+                linhas.append("\n🟢 EM ANDAMENTO:")
+                for papel, obra, desc, prazo in andamento_e:
+                    linhas.append(f"  • [{papel}] {obra} — {desc}  (prazo: {prazo})")
+
+            linhas.append(f"\nTotal: {len(pendentes_email)} tarefa(s) pendente(s)")
+            linhas.append(f"OTD histórico: {otd_pct}% ({len(otd_ok)}/{len(concluidas)} no prazo)")
+            linhas.append("\nQualquer dúvida, estou à disposição!")
+
+            st.text_area("Corpo do e-mail", value="\n".join(linhas),
+                          height=380, key="email_1on1")
+            st.caption("Copie o texto acima e cole no seu cliente de e-mail.")
+
+# ==========================================================
+# PÁGINA: FINANCEIRO — DASHBOARD DE CUSTOS
+# ==========================================================
+elif pagina_selecionada == "💰 Financeiro":
+    import plotly.graph_objects as go
+    import plotly.express as px
+
+    # ── CARGA ──────────────────────────────────────────────
+    @st.cache_data(ttl=300)
+    def carregar_custos():
+        rows, page, size = [], 0, 1000
+        while True:
+            resp = supabase.table("custos")\
+                .select("data, conta_macro, centro_custos, conta_gerencial, "
+                        "cli_fornecedor, valor_global")\
+                .range(page * size, (page + 1) * size - 1)\
+                .execute()
+            rows.extend(resp.data)
+            if len(resp.data) < size:
+                break
+            page += 1
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        df["data"]         = pd.to_datetime(df["data"], errors="coerce")
+        df["valor_global"] = pd.to_numeric(df["valor_global"], errors="coerce").fillna(0)
+        df["mes"]          = df["data"].dt.to_period("M").astype(str)
+        return df
+
+    def fmt_brl(v):
+        if pd.isna(v) or v == 0:
+            return "R$ 0"
+        return "R$ " + f"{v:,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+    def curva_abc(df_in, col_grupo, col_valor):
+        g = (df_in.groupby(col_grupo)[col_valor]
+             .sum().sort_values(ascending=False).reset_index())
+        g.columns = ["nome", "valor"]
+        g = g[g["valor"] > 0].copy()
+        total       = g["valor"].sum()
+        g["pct"]    = g["valor"] / total * 100
+        g["cum_pct"]= g["pct"].cumsum()
+        g["classe"] = g["cum_pct"].apply(
+            lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C"))
+        return g
+
+    CORES_ABC = {"A": "#EF5350", "B": "#FFA726", "C": "#66BB6A"}
+
+    # ── CARREGA ────────────────────────────────────────────
+    df_custos = carregar_custos()
+
+    st.header("💰 Dashboard de Custos")
+
+    if df_custos.empty:
+        st.warning("Nenhum dado encontrado. Importe os arquivos na seção Importador.")
+        st.stop()
+
+    # ── FILTROS NO TOPO ────────────────────────────────────
+    meses_disp = sorted(df_custos["mes"].dropna().unique(), reverse=True)
+    categorias = sorted(df_custos["conta_macro"].dropna().unique())
+    centros    = sorted(df_custos["centro_custos"].dropna().unique())
+
+    fc1, fc2, fc3, fc4 = st.columns([2, 3, 3, 1])
+    sel_mes    = fc1.selectbox("Mês", meses_disp, index=0, key="fin_mes",
+                                label_visibility="collapsed")
+    sel_cat    = fc2.multiselect("Categoria", categorias, default=categorias,
+                                  key="fin_cat", placeholder="Todas as categorias")
+    sel_centro = fc3.multiselect("Centro de Custo", centros, default=centros,
+                                  key="fin_centro", placeholder="Todos os centros")
+    if fc4.button("🔄", key="btn_fin_refresh", help="Atualizar dados"):
+        carregar_custos.clear(); st.rerun()
+
+    # ── APLICA FILTROS ─────────────────────────────────────
+    cat_filtro    = sel_cat    if sel_cat    else categorias
+    centro_filtro = sel_centro if sel_centro else centros
+    df_f = df_custos[
+        df_custos["conta_macro"].isin(cat_filtro) &
+        df_custos["centro_custos"].isin(centro_filtro)
+    ].copy()
+
+    meses_ord = sorted(df_f["mes"].dropna().unique())
+    idx_atual = meses_ord.index(sel_mes) if sel_mes in meses_ord else len(meses_ord) - 1
+    mes_atual = meses_ord[idx_atual]
+    mes_ant   = meses_ord[idx_atual - 1] if idx_atual > 0 else None
+
+    df_atual = df_f[df_f["mes"] == mes_atual]
+    df_ant   = df_f[df_f["mes"] == mes_ant] if mes_ant else pd.DataFrame()
+
+    total_atual = df_atual["valor_global"].sum()
+    total_ant   = df_ant["valor_global"].sum() if not df_ant.empty else 0
+    var_pct     = (total_atual - total_ant) / total_ant * 100 if total_ant else 0
+    n_lanc      = len(df_atual)
+
+    # ── NÍVEL 1: MÉTRICAS ──────────────────────────────────
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("💰 Total do mês",  fmt_brl(total_atual))
+    m2.metric("📅 Mês anterior",  fmt_brl(total_ant))
+    delta_txt = f"{var_pct:+.1f}%"
+    m3.metric("📈 Variação",      delta_txt,
+              delta=delta_txt, delta_color="inverse")
+    m4.metric("📄 Lançamentos",   f"{n_lanc:,}".replace(",", "."))
+
+    st.divider()
+
+    # ── NÍVEL 2: EVOLUÇÃO 12 MESES + COMPARATIVO ──────────
+    meses_12 = meses_ord[-12:]
+    df_12    = df_f[df_f["mes"].isin(meses_12)]
+
+    l2a, l2b = st.columns(2)
+
+    with l2a:
+        st.subheader("Evolução 12 meses por categoria")
+        df_evol = (df_12.groupby(["mes","conta_macro"])["valor_global"]
+                   .sum().reset_index())
+        fig_evol = px.bar(
+            df_evol, x="mes", y="valor_global", color="conta_macro",
+            barmode="stack",
+            labels={"mes":"","valor_global":"R$","conta_macro":""},
+            color_discrete_sequence=px.colors.qualitative.Set2)
+        fig_evol.update_layout(
+            yaxis_tickformat=",.0f", yaxis_tickprefix="R$ ",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            margin=dict(t=50, b=20), height=340)
+        fig_evol.update_traces(hovertemplate="%{x}<br>%{fullData.name}<br>R$ %{y:,.0f}<extra></extra>")
+        st.plotly_chart(fig_evol, use_container_width=True)
+
+    with l2b:
+        st.subheader(f"{mes_atual} vs {mes_ant or '—'} por categoria")
+        if mes_ant:
+            comp_a = df_atual.groupby("conta_macro")["valor_global"].sum().rename("atual")
+            comp_b = df_ant.groupby("conta_macro")["valor_global"].sum().rename("anterior")
+            df_comp = (pd.concat([comp_a, comp_b], axis=1)
+                       .fillna(0).reset_index()
+                       .melt("conta_macro", var_name="período", value_name="valor"))
+            fig_comp = px.bar(
+                df_comp, x="conta_macro", y="valor", color="período",
+                barmode="group",
+                labels={"conta_macro":"","valor":"R$","período":""},
+                color_discrete_map={"atual":"#1976D2","anterior":"#90CAF9"})
+            fig_comp.update_layout(
+                yaxis_tickformat=",.0f", yaxis_tickprefix="R$ ",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                margin=dict(t=50, b=20), height=340, xaxis_tickangle=-25)
+            fig_comp.update_traces(hovertemplate="%{x}<br>R$ %{y:,.0f}<extra></extra>")
+            st.plotly_chart(fig_comp, use_container_width=True)
+        else:
+            st.info("Não há mês anterior para comparar com os filtros aplicados.")
+
+    st.divider()
+
+    # ── NÍVEL 3: ABC CONTA GERENCIAL + ROSCA ──────────────
+    l3a, l3b = st.columns(2)
+
+    with l3a:
+        st.subheader("Curva ABC — Conta Gerencial")
+        abc_cg = curva_abc(df_atual, "conta_gerencial", "valor_global")
+        if not abc_cg.empty:
+            fig_abc = go.Figure()
+            fig_abc.add_trace(go.Bar(
+                x=abc_cg["nome"], y=abc_cg["valor"],
+                marker_color=[CORES_ABC[c] for c in abc_cg["classe"]],
+                name="Valor",
+                hovertemplate="%{x}<br>R$ %{y:,.0f}<extra></extra>"))
+            fig_abc.add_trace(go.Scatter(
+                x=abc_cg["nome"], y=abc_cg["cum_pct"],
+                yaxis="y2", mode="lines+markers", name="Acumulado %",
+                line=dict(color="#1A237E", width=2),
+                hovertemplate="%{y:.1f}%<extra></extra>"))
+            fig_abc.update_layout(
+                yaxis=dict(tickformat=",.0f", tickprefix="R$ "),
+                yaxis2=dict(overlaying="y", side="right",
+                            range=[0, 105], ticksuffix="%", showgrid=False),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                margin=dict(t=50, b=70), height=340,
+                xaxis=dict(tickangle=-40, showticklabels=True))
+            st.plotly_chart(fig_abc, use_container_width=True)
+
+            tbl = abc_cg.copy()
+            tbl["Valor"] = tbl["valor"].apply(fmt_brl)
+            tbl["%"]     = tbl["pct"].apply(lambda x: f"{x:.1f}%")
+            tbl["Acum."] = tbl["cum_pct"].apply(lambda x: f"{x:.1f}%")
+            st.dataframe(
+                tbl[["classe","nome","Valor","%","Acum."]].rename(
+                    columns={"classe":"Classe","nome":"Conta Gerencial"}),
+                use_container_width=True, hide_index=True, height=230)
+
+    with l3b:
+        st.subheader("Distribuição por Categoria")
+        df_cat = (df_atual.groupby("conta_macro")["valor_global"]
+                  .sum().reset_index())
+        df_cat = df_cat[df_cat["valor_global"] > 0]
+        if not df_cat.empty:
+            fig_pie = go.Figure(go.Pie(
+                labels=df_cat["conta_macro"],
+                values=df_cat["valor_global"],
+                hole=0.42,
+                textinfo="label+percent",
+                textposition="outside",
+                hovertemplate="%{label}<br>R$ %{value:,.0f}<br>%{percent}<extra></extra>",
+                marker=dict(colors=px.colors.qualitative.Set2)))
+            fig_pie.update_layout(
+                showlegend=False,
+                margin=dict(t=30, b=30, l=30, r=30),
+                height=430)
+            st.plotly_chart(fig_pie, use_container_width=True)
+
+    st.divider()
+
+    # ── NÍVEL 4: TOP N FORNECEDORES + ABC ─────────────────
+    top_n = st.slider("Top N fornecedores", 5, 50, 15, key="fin_topn",
+                       label_visibility="collapsed")
+
+    l4a, l4b = st.columns(2)
+
+    with l4a:
+        st.subheader(f"Top {top_n} Fornecedores")
+        df_forn = (df_atual.groupby("cli_fornecedor")["valor_global"]
+                   .sum().sort_values(ascending=False)
+                   .head(top_n).reset_index())
+        df_forn.columns = ["fornecedor", "valor"]
+        if not df_forn.empty:
+            fig_forn = go.Figure(go.Bar(
+                x=df_forn["valor"],
+                y=df_forn["fornecedor"],
+                orientation="h",
+                marker_color="#42A5F5",
+                text=df_forn["valor"].apply(fmt_brl),
+                textposition="outside",
+                hovertemplate="%{y}<br>R$ %{x:,.0f}<extra></extra>"))
+            fig_forn.update_layout(
+                xaxis=dict(tickformat=",.0f", tickprefix="R$ "),
+                yaxis=dict(autorange="reversed"),
+                margin=dict(t=20, b=10, r=180),
+                height=max(300, top_n * 30))
+            st.plotly_chart(fig_forn, use_container_width=True)
+
+    with l4b:
+        st.subheader("Curva ABC — Fornecedores")
+        abc_forn = curva_abc(df_atual, "cli_fornecedor", "valor_global")
+        if not abc_forn.empty:
+            fig_abc_f = go.Figure()
+            fig_abc_f.add_trace(go.Bar(
+                x=abc_forn["nome"], y=abc_forn["valor"],
+                marker_color=[CORES_ABC[c] for c in abc_forn["classe"]],
+                name="Valor",
+                hovertemplate="%{x}<br>R$ %{y:,.0f}<extra></extra>"))
+            fig_abc_f.add_trace(go.Scatter(
+                x=abc_forn["nome"], y=abc_forn["cum_pct"],
+                yaxis="y2", mode="lines+markers", name="Acumulado %",
+                line=dict(color="#1A237E", width=2),
+                hovertemplate="%{y:.1f}%<extra></extra>"))
+            fig_abc_f.update_layout(
+                yaxis=dict(tickformat=",.0f", tickprefix="R$ "),
+                yaxis2=dict(overlaying="y", side="right",
+                            range=[0, 105], ticksuffix="%", showgrid=False),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                margin=dict(t=50, b=40), height=340,
+                xaxis=dict(showticklabels=False))
+            st.plotly_chart(fig_abc_f, use_container_width=True)
+
+            tbl_f = abc_forn.copy()
+            tbl_f["Valor"] = tbl_f["valor"].apply(fmt_brl)
+            tbl_f["%"]     = tbl_f["pct"].apply(lambda x: f"{x:.1f}%")
+            tbl_f["Acum."] = tbl_f["cum_pct"].apply(lambda x: f"{x:.1f}%")
+            st.dataframe(
+                tbl_f[["classe","nome","Valor","%","Acum."]].rename(
+                    columns={"classe":"Classe","nome":"Fornecedor"}),
+                use_container_width=True, hide_index=True, height=230)
