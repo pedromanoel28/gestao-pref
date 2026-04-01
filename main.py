@@ -1369,22 +1369,25 @@ elif pagina_selecionada == "🏭 Produção":
     # ── FUNÇÕES DE CARGA ────────────────────────────────────
     @st.cache_data(ttl=600)
     def carregar_fabricacao(inicio, fim):
-        rows, page, size = [], 0, 1000
+        def _query(cols):
+            rows, page, size = [], 0, 1000
+            q = supabase.table("producao_fabricacao").select(cols)
+            if inicio: q = q.gte("data_fabricacao", inicio)
+            if fim:    q = q.lte("data_fabricacao", fim)
+            while True:
+                resp = q.range(page * size, (page + 1) * size - 1).execute()
+                rows.extend(resp.data)
+                if len(resp.data) < size: break
+                page += 1
+            return rows
+
         try:
-            cols = ("obra_id, produto, etapa, volume_total, peso_aco,"
-                    " peso_aco_frouxo, peso_aco_cord_viga, peso_aco_cord_laje,"
-                    " data_fabricacao")
-            q = supabase.table("producao_fabricacao").select(cols)
+            rows = _query("obra_id, produto, etapa, volume_total, peso_aco,"
+                          " peso_aco_frouxo, peso_aco_cord_viga, peso_aco_cord_laje,"
+                          " data_fabricacao")
         except Exception:
-            cols = "obra_id, produto, etapa, volume_total, peso_aco, data_fabricacao"
-            q = supabase.table("producao_fabricacao").select(cols)
-        if inicio: q = q.gte("data_fabricacao", inicio)
-        if fim:    q = q.lte("data_fabricacao", fim)
-        while True:
-            resp = q.range(page * size, (page + 1) * size - 1).execute()
-            rows.extend(resp.data)
-            if len(resp.data) < size: break
-            page += 1
+            rows = _query("obra_id, produto, etapa, volume_total, peso_aco, data_fabricacao")
+
         df = pd.DataFrame(rows)
         if df.empty: return df
         for col in ["volume_total", "peso_aco", "peso_aco_frouxo",
@@ -2068,19 +2071,20 @@ elif pagina_selecionada == "🏭 Produção":
             # Carregar todos os dados históricos (sem filtro temporal) para média
             @st.cache_data(ttl=600)
             def carregar_fabricacao_historico():
-                rows, page, size = [], 0, 1000
-                try:
-                    cols = ("obra_id, produto, volume_total, peso_aco,"
-                            " peso_aco_frouxo, peso_aco_cord_viga, peso_aco_cord_laje")
+                def _q(cols):
+                    rows, page, size = [], 0, 1000
                     q = supabase.table("producao_fabricacao").select(cols)
+                    while True:
+                        resp = q.range(page * size, (page + 1) * size - 1).execute()
+                        rows.extend(resp.data)
+                        if len(resp.data) < size: break
+                        page += 1
+                    return rows
+                try:
+                    rows = _q("obra_id, produto, volume_total, peso_aco,"
+                              " peso_aco_frouxo, peso_aco_cord_viga, peso_aco_cord_laje")
                 except Exception:
-                    q = supabase.table("producao_fabricacao").select(
-                        "obra_id, produto, volume_total, peso_aco")
-                while True:
-                    resp = q.range(page * size, (page + 1) * size - 1).execute()
-                    rows.extend(resp.data)
-                    if len(resp.data) < size: break
-                    page += 1
+                    rows = _q("obra_id, produto, volume_total, peso_aco")
                 df = pd.DataFrame(rows)
                 if df.empty: return df
                 for col in ["volume_total", "peso_aco", "peso_aco_frouxo",
