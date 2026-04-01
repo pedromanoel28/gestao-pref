@@ -1336,7 +1336,7 @@ elif pagina_selecionada == "💰 Financeiro":
     @st.cache_data(ttl=300)
     def carregar_medicoes_completas(obra_id):
         # Seleciona colunas explícitas (sem *) e filtra tipo em Python
-        cols = ("id, obra_id, data_acao, numero_nf, numero_nf_remessa, "
+        cols = ("obra_id, data_acao, numero_nf, numero_nf_remessa, "
                 "descricao, tipo, valor, nome_pagador, cnpj_recebedor, "
                 "razao_social_recebedor, etapa_obra, categoria, observacoes")
         rows, page, size = [], 0, 1000
@@ -1354,10 +1354,11 @@ elif pagina_selecionada == "💰 Financeiro":
         df = df.sort_values("data_acao", ascending=False).reset_index(drop=True)
         return df
 
-    @st.cache_data(ttl=300)
-    def volume_fabricado_por_obra():
+    def _carregar_volumes(tabela, col_vol, col_data):
+        """Carrega (obra_id, peca, col_vol) com deduplicação por (obra_id, peca).
+        Deduplicar evita contagem dobrada quando a importação foi executada mais de uma vez."""
         rows, page, size = [], 0, 1000
-        q = supabase.table("producao_fabricacao").select("obra_id, volume_teorico")
+        q = supabase.table(tabela).select(f"obra_id, peca, {col_vol}")
         while True:
             resp = q.range(page * size, (page + 1) * size - 1).execute()
             rows.extend(resp.data)
@@ -1365,8 +1366,23 @@ elif pagina_selecionada == "💰 Financeiro":
             page += 1
         if not rows: return {}
         df = pd.DataFrame(rows)
-        df["volume_teorico"] = pd.to_numeric(df["volume_teorico"], errors="coerce").fillna(0)
-        return df.groupby("obra_id")["volume_teorico"].sum().to_dict()
+        df[col_vol] = pd.to_numeric(df[col_vol], errors="coerce").fillna(0)
+        # Manter apenas a primeira ocorrência de cada peça por obra
+        # — elimina duplicatas de reimportação sem remover peças distintas
+        df = df.drop_duplicates(subset=["obra_id", "peca"])
+        return df.groupby("obra_id")[col_vol].sum().to_dict()
+
+    @st.cache_data(ttl=300)
+    def volume_fabricado_por_obra():
+        return _carregar_volumes("producao_fabricacao", "volume_teorico", "data_fabricacao")
+
+    @st.cache_data(ttl=300)
+    def volume_expedido_por_obra():
+        return _carregar_volumes("producao_transporte", "volume_real", "data_expedicao")
+
+    @st.cache_data(ttl=300)
+    def volume_montado_por_obra():
+        return _carregar_volumes("producao_montagem", "volume_teorico", "data_montagem")
 
     # ── FUNÇÕES DE CÁLCULO ────────────────────────────────────
 
@@ -1429,6 +1445,8 @@ elif pagina_selecionada == "💰 Financeiro":
         carregar_medicoes.clear()
         carregar_medicoes_completas.clear()
         volume_fabricado_por_obra.clear()
+        volume_expedido_por_obra.clear()
+        volume_montado_por_obra.clear()
         st.rerun()
 
     tab_cart, tab_obra = st.tabs(["📊 Carteira", "🏗️ Obra"])
@@ -1634,44 +1652,89 @@ elif pagina_selecionada == "💰 Financeiro":
 
         st.divider()
 
-        # Avanço físico vs financeiro
+        # Avanço físico (fabricação, expedição, montagem) vs financeiro
         st.markdown("#### 📐 Avanço físico vs financeiro")
         vref, vref_origem = vol_ref_row(row_obra)
-        vol_fab_map = volume_fabricado_por_obra()
-        vol_fab_o   = float(vol_fab_map.get(obra_id_f, 0))
 
-        av1, av2 = st.columns(2)
+        vol_fab_o = float(volume_fabricado_por_obra().get(obra_id_f, 0))
+        vol_exp_o = float(volume_expedido_por_obra().get(obra_id_f, 0))
+        vol_mon_o = float(volume_montado_por_obra().get(obra_id_f, 0))
+
+        def _pct(vol, ref):
+            return min(vol / ref, 1.0) if ref and ref > 0 else 0.0
+
+        pct_fab = _pct(vol_fab_o, vref)
+        pct_exp = _pct(vol_exp_o, vref)
+        pct_mon = _pct(vol_mon_o, vref)
+        pct_fis = pct_fab  # referência para gap vs financeiro
+
+        av1, av2, av3, av4 = st.columns(4)
+
         with av1:
-            st.markdown("**Físico (fabricação)**")
+            st.markdown("**🏭 Fabricação**")
             if vref and vref > 0:
-                pct_fis = min(vol_fab_o / vref, 1.0)
-                st.progress(pct_fis)
+                st.progress(pct_fab)
                 st.caption(
-                    f"{vol_fab_o:,.1f} m³ fab. / {vref:,.1f} m³ ref. ({vref_origem})"
-                    f" — {pct_fis*100:.1f}%".replace(",", "."))
+                    f"{vol_fab_o:,.1f} / {vref:,.1f} m³ ({vref_origem})"
+                    f" — **{pct_fab*100:.1f}%**".replace(",", "."))
             else:
-                pct_fis = 0.0
-                st.info("Volume de referência não disponível para esta obra.")
+                st.progress(0.0)
+                st.caption("Ref. não disponível")
 
         with av2:
-            st.markdown("**Financeiro (faturamento)**")
+            st.markdown("**🚛 Expedição**")
+            if vref and vref > 0:
+                st.progress(pct_exp)
+                st.caption(
+                    f"{vol_exp_o:,.1f} / {vref:,.1f} m³"
+                    f" — **{pct_exp*100:.1f}%**".replace(",", "."))
+            elif vol_fab_o > 0:
+                # Sem vref: mostra % sobre fabricado
+                pct_exp_fab = _pct(vol_exp_o, vol_fab_o)
+                st.progress(pct_exp_fab)
+                st.caption(
+                    f"{vol_exp_o:,.1f} / {vol_fab_o:,.1f} m³ fab."
+                    f" — **{pct_exp_fab*100:.1f}%**".replace(",", "."))
+            else:
+                st.progress(0.0)
+                st.caption("Sem dados de fabricação")
+
+        with av3:
+            st.markdown("**🏗️ Montagem**")
+            if vref and vref > 0:
+                st.progress(pct_mon)
+                st.caption(
+                    f"{vol_mon_o:,.1f} / {vref:,.1f} m³"
+                    f" — **{pct_mon*100:.1f}%**".replace(",", "."))
+            elif vol_fab_o > 0:
+                pct_mon_fab = _pct(vol_mon_o, vol_fab_o)
+                st.progress(pct_mon_fab)
+                st.caption(
+                    f"{vol_mon_o:,.1f} / {vol_fab_o:,.1f} m³ fab."
+                    f" — **{pct_mon_fab*100:.1f}%**".replace(",", "."))
+            else:
+                st.progress(0.0)
+                st.caption("Sem dados de fabricação")
+
+        with av4:
+            st.markdown("**💰 Financeiro**")
             st.progress(min(pct_fin_o, 1.0))
             st.caption(
                 f"{fmt_brl_fin(faturado_o)} / {fmt_brl_fin(fat_total_o)}"
-                f" — {pct_fin_o*100:.1f}%")
+                f" — **{pct_fin_o*100:.1f}%**")
 
-        # Gap físico vs financeiro
+        # Gap fabricação vs financeiro
         if vref and vref > 0 and fat_total_o > 0:
             diff = pct_fis * 100 - pct_fin_o * 100
             valor_a_fat = (pct_fis - pct_fin_o) * fat_total_o
             if abs(diff) < 5:
-                st.success(f"✅ Avanços alinhados ({diff:+.1f}%)")
+                st.success(f"✅ Fabricação e financeiro alinhados ({diff:+.1f}%)")
             elif diff > 0:
                 st.info(
-                    f"📐 Físico à frente do financeiro em {diff:.1f}%"
+                    f"📐 Fabricação à frente do financeiro em {diff:.1f}%"
                     f" — {fmt_brl_fin(valor_a_fat)} a faturar")
             else:
-                st.warning(f"💰 Financeiro à frente do físico em {abs(diff):.1f}%")
+                st.warning(f"💰 Financeiro à frente da fabricação em {abs(diff):.1f}%")
 
         st.divider()
 
