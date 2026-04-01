@@ -156,14 +156,19 @@ def limpar_nan_pacote(pacote):
         })
     return limpo
 
-def enviar_lotes(tabela, pacote, barra_label="Enviando..."):
-    """Envia em lotes de 500 com barra de progresso."""
+def enviar_lotes(tabela, pacote, barra_label="Enviando...", on_conflict=None):
+    """Envia em lotes de 500 com barra de progresso.
+    Se on_conflict for fornecido, usa upsert; caso contrário insert."""
     total = len(pacote)
     barra = st.progress(0, text=barra_label)
     enviado = 0
     for i in range(0, total, 500):
-        supabase.table(tabela).insert(pacote[i:i+500]).execute()
-        enviado += len(pacote[i:i+500])
+        lote = pacote[i:i+500]
+        if on_conflict:
+            supabase.table(tabela).upsert(lote, on_conflict=on_conflict).execute()
+        else:
+            supabase.table(tabela).insert(lote).execute()
+        enviado += len(lote)
         barra.progress(min(enviado/total, 1.0), text=f"{enviado}/{total} registros")
     return enviado
 
@@ -342,8 +347,9 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             df = nulos(df)
                             pacote = df[cols_bd].to_dict("records")
                             pacote = fix_ids(pacote)
-                            total = enviar_lotes(tabela, pacote, f"Enviando para {tabela}...")
-                            st.success(f"🎉 {total} registros importados em {tabela}!")
+                            total = enviar_lotes(tabela, pacote, f"Enviando para {tabela}...",
+                                                 on_conflict="obra_id,codigo")
+                            st.success(f"🎉 {total} registros atualizados em {tabela}!")
                             if ignorados: st.warning(f"⚠️ {ignorados} linha(s) ignorada(s): obra não encontrada.")
 
                         # ── ROTA 10: CUSTOS ──────────────────────────────────
@@ -761,6 +767,20 @@ def limpar_cache():
     carregar_alertas.clear()
     carregar_ultimo_update.clear()
     carregar_tarefas_colab.clear()
+    try: carregar_obras_completo.clear()
+    except: pass
+    try: carregar_medicoes_resumo.clear()
+    except: pass
+    try: carregar_producao_resumo.clear()
+    except: pass
+    try: carregar_transporte_resumo.clear()
+    except: pass
+    try: carregar_montagem_resumo.clear()
+    except: pass
+    try: carregar_custos_resumo.clear()
+    except: pass
+    try: carregar_tarefas_extras.clear()
+    except: pass
 
 # ── PAINEL LATERAL — EDIÇÃO RÁPIDA DE OBRA ──────────────
 _SB_STATUS   = ["Em Andamento", "Concluída", "Cancelada", "Proposta"]
@@ -834,6 +854,215 @@ def volume_referencia(obra_id):
         return None
 
 # ==========================================================
+# FUNÇÕES COMPARTILHADAS — TODOS OS DASHBOARDS
+# ==========================================================
+
+@st.cache_data(ttl=300)
+def carregar_obras_completo():
+    """obras LEFT JOIN obras_financeiro — base de todos os dashboards."""
+    resp_o = supabase.table("obras")\
+        .select("id, codigo, nome, status, modalidade, cliente")\
+        .order("nome").execute()
+    df_o = pd.DataFrame(resp_o.data or [])
+    if df_o.empty:
+        return df_o
+    cols_fin = ("obra_id, faturamento_total, volume, volume_projeto, custo_total, lucro,"
+                " concreto, aco_estrutural, formas, mo_producao, materiais_consumo,"
+                " equip_fab, custos_indiretos, eps, estuque, insertos, consoles, neoprene,"
+                " descida_agua, pecas_consorcio, investimentos, frete, equip_montagem,"
+                " mo_montagem, despesas_equipe, topografia, mobilizacao, equip_aux_montagem,"
+                " outros, eventuais, despesas_comerciais")
+    resp_f = supabase.table("obras_financeiro").select(cols_fin).execute()
+    df_f   = pd.DataFrame(resp_f.data or [])
+    if not df_f.empty:
+        df = df_o.merge(df_f, left_on="id", right_on="obra_id", how="left")
+        df = df.drop(columns=["obra_id"], errors="ignore")
+    else:
+        df = df_o.copy()
+    num_cols = [
+        "faturamento_total","volume","volume_projeto","custo_total","lucro",
+        "concreto","aco_estrutural","formas","mo_producao","materiais_consumo",
+        "equip_fab","custos_indiretos","eps","estuque","insertos","consoles",
+        "neoprene","descida_agua","pecas_consorcio","investimentos","frete",
+        "equip_montagem","mo_montagem","despesas_equipe","topografia",
+        "mobilizacao","equip_aux_montagem","outros","eventuais","despesas_comerciais",
+    ]
+    for c in num_cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    return df
+
+@st.cache_data(ttl=300)
+def carregar_medicoes_resumo():
+    """notas_fiscais sem canceladas/remessas, com campo mes."""
+    rows, page, size = [], 0, 1000
+    q = supabase.table("notas_fiscais")\
+        .select("obra_id, data_acao, descricao, tipo, valor")
+    while True:
+        resp = q.range(page * size, (page + 1) * size - 1).execute()
+        rows.extend(resp.data)
+        if len(resp.data) < size: break
+        page += 1
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    excluir = {"NOTA FISCAL CANCELADA", "NOTA FISCAL REMESSA"}
+    df = df[~df["tipo"].str.strip().str.upper().isin(excluir)].copy()
+    df["data_acao"] = pd.to_datetime(df["data_acao"], errors="coerce")
+    df["valor"]     = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
+    df["mes"]       = df["data_acao"].dt.to_period("M").astype(str)
+    return df
+
+@st.cache_data(ttl=300)
+def carregar_producao_resumo():
+    """producao_fabricacao com dedup por (obra_id, peca) — volume_teorico correto."""
+    size = 1000
+    try:
+        cols = ("obra_id, peca, produto, secao, etapa, qtde_pecas,"
+                " volume_teorico, volume_total, peso_aco_frouxo,"
+                " peso_aco_protendido, peso_aco, data_fabricacao")
+        # testa se colunas existem
+        supabase.table("producao_fabricacao").select(cols).range(0, 0).execute()
+    except Exception:
+        cols = ("obra_id, peca, produto, etapa, volume_teorico,"
+                " volume_total, peso_aco, data_fabricacao")
+    rows, page = [], 0
+    q = supabase.table("producao_fabricacao").select(cols)
+    while True:
+        resp = q.range(page * size, (page + 1) * size - 1).execute()
+        rows.extend(resp.data)
+        if len(resp.data) < size: break
+        page += 1
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    if "peca" in df.columns:
+        df = df.drop_duplicates(subset=["obra_id", "peca"])
+    for col in ["volume_teorico","volume_total","peso_aco",
+                "peso_aco_frouxo","peso_aco_protendido","qtde_pecas"]:
+        if col not in df.columns:
+            df[col] = 0.0
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    df["data_fabricacao"] = pd.to_datetime(df["data_fabricacao"], errors="coerce")
+    df["mes"] = df["data_fabricacao"].dt.to_period("M").astype(str)
+    return df
+
+@st.cache_data(ttl=300)
+def carregar_transporte_resumo():
+    """producao_transporte resumido para dashboards."""
+    rows, page, size = [], 0, 1000
+    q = supabase.table("producao_transporte")\
+        .select("obra_id, produto, volume_real, data_expedicao")
+    while True:
+        resp = q.range(page * size, (page + 1) * size - 1).execute()
+        rows.extend(resp.data)
+        if len(resp.data) < size: break
+        page += 1
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["volume_real"]    = pd.to_numeric(df["volume_real"], errors="coerce").fillna(0)
+    df["data_expedicao"] = pd.to_datetime(df["data_expedicao"], errors="coerce")
+    df["mes"]            = df["data_expedicao"].dt.to_period("M").astype(str)
+    return df
+
+@st.cache_data(ttl=300)
+def carregar_montagem_resumo():
+    """producao_montagem resumido para dashboards."""
+    rows, page, size = [], 0, 1000
+    q = supabase.table("producao_montagem")\
+        .select("obra_id, produto, volume_teorico, data_montagem")
+    while True:
+        resp = q.range(page * size, (page + 1) * size - 1).execute()
+        rows.extend(resp.data)
+        if len(resp.data) < size: break
+        page += 1
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["volume_teorico"] = pd.to_numeric(df["volume_teorico"], errors="coerce").fillna(0)
+    df["data_montagem"]  = pd.to_datetime(df["data_montagem"], errors="coerce")
+    df["mes"]            = df["data_montagem"].dt.to_period("M").astype(str)
+    return df
+
+@st.cache_data(ttl=300)
+def carregar_custos_resumo():
+    """custos para eficiência — valor_global em abs()."""
+    rows, page, size = [], 0, 1000
+    q = supabase.table("custos")\
+        .select("data, conta_macro, conta_gerencial, centro_custos, cli_fornecedor, valor_global")
+    while True:
+        resp = q.range(page * size, (page + 1) * size - 1).execute()
+        rows.extend(resp.data)
+        if len(resp.data) < size: break
+        page += 1
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["data"]         = pd.to_datetime(df["data"], errors="coerce")
+    df["valor_global"] = pd.to_numeric(df["valor_global"], errors="coerce").abs().fillna(0)
+    df["mes"]          = df["data"].dt.to_period("M").astype(str)
+    return df
+
+@st.cache_data(ttl=60)
+def carregar_tarefas_extras():
+    """Tarefas extras — obra_id IS NULL (não vinculadas a obra)."""
+    resp = supabase.table("obras_tarefas")\
+        .select("id, item, etapa, descricao, status, observacoes, impedimento, origem,"
+                " avanco_percent, inicio_previsto, entrega_prevista, entrega_real,"
+                " gut_gravidade, gut_urgencia, gut_tendencia, gut_score,"
+                " responsavel_id, aprovador_id,"
+                " responsavel:equipe!obras_tarefas_responsavel_id_fkey(nome)")\
+        .is_("obra_id", "null")\
+        .execute()
+    return resp.data
+
+def calcular_custos_categorias_g(row):
+    """Breakdown de custo previsto: fabricacao / transporte / montagem."""
+    def v(col):
+        val = row.get(col)
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return 0.0
+        return float(val)
+    return {
+        "fabricacao": sum(v(c) for c in [
+            "concreto","aco_estrutural","formas","mo_producao","materiais_consumo",
+            "equip_fab","custos_indiretos","eps","estuque","insertos","consoles",
+            "neoprene","descida_agua","pecas_consorcio","investimentos"]),
+        "transporte": v("frete"),
+        "montagem":   sum(v(c) for c in [
+            "mo_montagem","equip_montagem","equip_aux_montagem",
+            "despesas_equipe","topografia","mobilizacao"]),
+    }
+
+def volume_ref(row):
+    """Volume de referência da obra: volume_projeto > volume > 0."""
+    for col in ("volume_projeto", "volume"):
+        val = row.get(col)
+        if val is not None:
+            try:
+                f = float(val)
+                if f > 0:
+                    return f
+            except Exception:
+                pass
+    return 0.0
+
+def fmt_brl(valor):
+    """Formata float como moeda brasileira: R$ 1.234.567"""
+    if valor is None:
+        return "—"
+    try:
+        v = float(valor)
+        if pd.isna(v):
+            return "—"
+    except Exception:
+        return "—"
+    sinal = "-" if v < 0 else ""
+    return (f"{sinal}R$ "
+            + f"{abs(v):,.0f}".replace(",", "X").replace(".", ",").replace("X", "."))
+
+# ==========================================================
 # PÁGINA: GESTÃO DE OBRAS (SÚMULA)
 # ==========================================================
 if pagina_selecionada == "🏗️ Gestão de Obras":
@@ -904,203 +1133,502 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
         st.progress(pct/100)
         st.caption(f"**{pct}% concluído** · 📋 {total} · ✅ {concluidas} · 🔴 {atrasadas} · 🚧 {impedidas}")
 
-    # ── FILTROS ───────────────────────────────────────────
-    etapas_disp = sorted(set(t.get("etapa") or "—" for t in tarefas if t.get("etapa")))
-    fc1,fc2,fc3,fc4,fc5 = st.columns([2,2,2,2,1])
-    f_etapa  = fc1.selectbox("Etapa",  ["Todas"]+etapas_disp,    key="f_etapa",   label_visibility="collapsed")
-    f_status = fc2.selectbox("Status", ["Todos"]+STATUS_OPCOES,  key="f_fstatus", label_visibility="collapsed")
-    f_resp   = fc3.selectbox("Resp.",  ["Todos"]+equipe_nomes,   key="f_resp",    label_visibility="collapsed")
-    f_gut    = fc4.selectbox("GUT",    ["Todos","🔴 Alto","🟡 Médio","🟢 Baixo"], key="f_gut", label_visibility="collapsed")
-    f_conc   = fc5.checkbox("✅+N/A",  value=False, key="f_conc")
+    # ── ABAS PRINCIPAIS ──────────────────────────────────
+    aba_sumula, aba_extras, aba_dash = st.tabs(["🏗️ Obras", "📌 Extras", "📊 Dashboard"])
 
-    # ── NOVA TAREFA ───────────────────────────────────────
-    with st.expander("➕ Nova tarefa", expanded=False):
-        template        = carregar_template()
-        etapas_template = sorted(set(t.get("etapa","") for t in template if t.get("etapa")))
-        etapas_obra     = sorted(set(t.get("etapa","") for t in tarefas  if t.get("etapa")))
-        etapas_combo    = sorted(set(etapas_template + etapas_obra))
-        desc_por_etapa  = {}
-        for t in template + tarefas:
-            ep = t.get("etapa","")
-            desc_por_etapa.setdefault(ep,[]).append(t.get("descricao",""))
+    with aba_sumula:
+        # ── FILTROS ───────────────────────────────────────────
+        etapas_disp = sorted(set(t.get("etapa") or "—" for t in tarefas if t.get("etapa")))
+        fc1,fc2,fc3,fc4,fc5 = st.columns([2,2,2,2,1])
+        f_etapa  = fc1.selectbox("Etapa",  ["Todas"]+etapas_disp,    key="f_etapa",   label_visibility="collapsed")
+        f_status = fc2.selectbox("Status", ["Todos"]+STATUS_OPCOES,  key="f_fstatus", label_visibility="collapsed")
+        f_resp   = fc3.selectbox("Resp.",  ["Todos"]+equipe_nomes,   key="f_resp",    label_visibility="collapsed")
+        f_gut    = fc4.selectbox("GUT",    ["Todos","🔴 Alto","🟡 Médio","🟢 Baixo"], key="f_gut", label_visibility="collapsed")
+        f_conc   = fc5.checkbox("✅+N/A",  value=False, key="f_conc")
 
-        na1,na2,na3 = st.columns(3)
-        n_etapa_sel = na1.selectbox("Etapa",["(nova)"]+etapas_combo, key="n_etapa_sel")
-        n_etapa     = na1.text_input("Nome da etapa", key="n_etapa_livre") \
-                      if n_etapa_sel == "(nova)" else n_etapa_sel
-        n_item      = na2.text_input("Item", key="n_item")
-        n_status    = na3.selectbox("Status", STATUS_OPCOES, key="n_status")
+        # ── NOVA TAREFA ───────────────────────────────────────
+        with st.expander("➕ Nova tarefa", expanded=False):
+            template        = carregar_template()
+            etapas_template = sorted(set(t.get("etapa","") for t in template if t.get("etapa")))
+            etapas_obra     = sorted(set(t.get("etapa","") for t in tarefas  if t.get("etapa")))
+            etapas_combo    = sorted(set(etapas_template + etapas_obra))
+            desc_por_etapa  = {}
+            for t in template + tarefas:
+                ep = t.get("etapa","")
+                desc_por_etapa.setdefault(ep,[]).append(t.get("descricao",""))
 
-        descs = sorted(set(desc_por_etapa.get(n_etapa,[]))) if n_etapa_sel != "(nova)" else []
-        if descs:
-            n_desc_sel = st.selectbox("Descrição sugerida",["(escrever)"]+descs, key="n_desc_sel")
-            n_desc = st.text_input("Descrição", key="n_desc_livre") \
-                     if n_desc_sel == "(escrever)" else n_desc_sel
-        else:
-            n_desc = st.text_input("Descrição", key="n_desc_livre2")
-        n_obs = st.text_area("Observação", key="n_obs", height=50)
+            na1,na2,na3 = st.columns(3)
+            n_etapa_sel = na1.selectbox("Etapa",["(nova)"]+etapas_combo, key="n_etapa_sel")
+            n_etapa     = na1.text_input("Nome da etapa", key="n_etapa_livre") \
+                          if n_etapa_sel == "(nova)" else n_etapa_sel
+            n_item      = na2.text_input("Item", key="n_item")
+            n_status    = na3.selectbox("Status", STATUS_OPCOES, key="n_status")
 
-        nr1,nr2,nr3,nr4 = st.columns(4)
-        n_r = nr1.selectbox("R", equipe_nomes, key="n_r")
-        n_a = nr2.selectbox("A",["—"]+equipe_nomes, key="n_a")
-        n_c = nr3.selectbox("C",["—"]+equipe_nomes, key="n_c")
-        n_i = nr4.selectbox("I",["—"]+equipe_nomes, key="n_i")
-
-        nd1,nd2 = st.columns(2)
-        n_inicio  = nd1.date_input("Início",  value=None, key="n_ini", format="DD/MM/YYYY")
-        n_entrega = nd2.date_input("Entrega", value=None, key="n_ent", format="DD/MM/YYYY")
-
-        ng1,ng2,ng3,ng4 = st.columns(4)
-        n_g = ng1.slider("G",1,5,1,key="n_g")
-        n_u = ng2.slider("U",1,5,1,key="n_u")
-        n_t = ng3.slider("T",1,5,1,key="n_t")
-        ng4.metric("GUT", n_g*n_u*n_t)
-
-        if st.button("💾 Criar", type="primary", key="btn_nova"):
-            if n_desc:
-                supabase.table("obras_tarefas").insert({
-                    "obra_id":          obra_id,
-                    "item":             n_item or None,
-                    "etapa":            n_etapa or None,
-                    "descricao":        n_desc,
-                    "observacoes":      n_obs or None,
-                    "responsavel_id":   equipe_ids.get(n_r),
-                    "aprovador_id":     equipe_ids.get(n_a) if n_a != "—" else None,
-                    "consultado_id":    equipe_ids.get(n_c) if n_c != "—" else None,
-                    "informado_id":     equipe_ids.get(n_i) if n_i != "—" else None,
-                    "status":           n_status,
-                    "inicio_previsto":  n_inicio.isoformat()  if n_inicio  else None,
-                    "entrega_prevista": n_entrega.isoformat() if n_entrega else None,
-                    "gut_gravidade":    n_g,"gut_urgencia":n_u,"gut_tendencia":n_t,
-                    "gut_score":        n_g*n_u*n_t,"avanco_percent":0,
-                }).execute()
-                limpar_cache(); st.success("✅ Criada!"); st.rerun()
+            descs = sorted(set(desc_por_etapa.get(n_etapa,[]))) if n_etapa_sel != "(nova)" else []
+            if descs:
+                n_desc_sel = st.selectbox("Descrição sugerida",["(escrever)"]+descs, key="n_desc_sel")
+                n_desc = st.text_input("Descrição", key="n_desc_livre") \
+                         if n_desc_sel == "(escrever)" else n_desc_sel
             else:
-                st.warning("Descrição é obrigatória.")
+                n_desc = st.text_input("Descrição", key="n_desc_livre2")
+            n_obs = st.text_area("Observação", key="n_obs", height=50)
 
-    # ── SEM TAREFAS ───────────────────────────────────────
-    if not tarefas:
-        st.info("Esta obra ainda não possui tarefas.")
-        template = carregar_template()
-        if template and st.button("📋 Criar do Template", type="primary"):
-            supabase.table("obras_tarefas").insert([{
-                "obra_id":obra_id,"item":str(t.get("item","")),
-                "etapa":t.get("etapa"),"descricao":t.get("descricao"),
-                "status":t.get("status_padrao") or "A Iniciar",
-                "gut_gravidade":1,"gut_urgencia":1,"gut_tendencia":1,
-                "gut_score":1,"avanco_percent":0,
-            } for t in template]).execute()
-            limpar_cache(); st.rerun()
-        st.stop()
+            nr1,nr2,nr3,nr4 = st.columns(4)
+            n_r = nr1.selectbox("R", equipe_nomes, key="n_r")
+            n_a = nr2.selectbox("A",["—"]+equipe_nomes, key="n_a")
+            n_c = nr3.selectbox("C",["—"]+equipe_nomes, key="n_c")
+            n_i = nr4.selectbox("I",["—"]+equipe_nomes, key="n_i")
 
-    # ── APLICA FILTROS ────────────────────────────────────
-    tf = tarefas
-    if not f_conc:          tf = [t for t in tf if t["status"] not in ("Concluído","N/A")]
-    if f_etapa  != "Todas": tf = [t for t in tf if t.get("etapa") == f_etapa]
-    if f_status != "Todos": tf = [t for t in tf if t["status"] == f_status]
-    if f_resp   != "Todos": tf = [t for t in tf if (t.get("responsavel") or {}).get("nome") == f_resp]
-    if "Alto"   in f_gut:   tf = [t for t in tf if (t.get("gut_score") or 1) >= 75]
-    elif "Médio" in f_gut:  tf = [t for t in tf if 27 <= (t.get("gut_score") or 1) < 75]
-    elif "Baixo" in f_gut:  tf = [t for t in tf if (t.get("gut_score") or 1) < 27]
+            nd1,nd2 = st.columns(2)
+            n_inicio  = nd1.date_input("Início",  value=None, key="n_ini", format="DD/MM/YYYY")
+            n_entrega = nd2.date_input("Entrega", value=None, key="n_ent", format="DD/MM/YYYY")
 
-    # ── MONTA DATAFRAME ───────────────────────────────────
-    _hoje = date.today()   # calculado uma única vez para todo o loop
-    rows = []
-    for t in tf:
-        rows.append({
-            "_id":        t["id"],
-            "GUT":        gut_emoji(t.get("gut_score") or 1),
-            "Etapa":      t.get("etapa") or "—",
-            "Descrição":  f"{calcular_farol(t.get('entrega_prevista'), t['status'], _hoje)} {t.get('descricao') or '—'}",
-            "Resp.":      (t.get("responsavel") or {}).get("nome","—"),
-            "Status":     t["status"],
-            "Desvio":     calcular_desvio(t.get("entrega_prevista"), t.get("entrega_real"), t["status"], _hoje),
-            "Av.%":       t.get("avanco_percent") or 0,
-        })
+            ng1,ng2,ng3,ng4 = st.columns(4)
+            n_g = ng1.slider("G",1,5,1,key="n_g")
+            n_u = ng2.slider("U",1,5,1,key="n_u")
+            n_t = ng3.slider("T",1,5,1,key="n_t")
+            ng4.metric("GUT", n_g*n_u*n_t)
 
-    df = pd.DataFrame(rows)
-    st.caption(f"**{len(df)}** tarefa(s) · clique em uma linha para editar")
+            if st.button("💾 Criar", type="primary", key="btn_nova"):
+                if n_desc:
+                    supabase.table("obras_tarefas").insert({
+                        "obra_id":          obra_id,
+                        "item":             n_item or None,
+                        "etapa":            n_etapa or None,
+                        "descricao":        n_desc,
+                        "observacoes":      n_obs or None,
+                        "responsavel_id":   equipe_ids.get(n_r),
+                        "aprovador_id":     equipe_ids.get(n_a) if n_a != "—" else None,
+                        "consultado_id":    equipe_ids.get(n_c) if n_c != "—" else None,
+                        "informado_id":     equipe_ids.get(n_i) if n_i != "—" else None,
+                        "status":           n_status,
+                        "inicio_previsto":  n_inicio.isoformat()  if n_inicio  else None,
+                        "entrega_prevista": n_entrega.isoformat() if n_entrega else None,
+                        "gut_gravidade":    n_g,"gut_urgencia":n_u,"gut_tendencia":n_t,
+                        "gut_score":        n_g*n_u*n_t,"avanco_percent":0,
+                    }).execute()
+                    limpar_cache(); st.success("✅ Criada!"); st.rerun()
+                else:
+                    st.warning("Descrição é obrigatória.")
 
-    # ── TABELA NATIVA ─────────────────────────────────────
-    sel = st.dataframe(
-        df.drop(columns=["_id"]),
-        use_container_width=True,
-        hide_index=True,
-        height=min(400, 36 + 35 * len(df)),
-        on_select="rerun",
-        selection_mode="single-row",
-        column_config={
-            "GUT":       st.column_config.TextColumn("GUT",      width="small"),
-            "Etapa":     st.column_config.TextColumn("Etapa",    width="medium"),
-            "Descrição": st.column_config.TextColumn("Descrição",width="large"),
-            "Resp.":     st.column_config.TextColumn("Resp.",    width="medium"),
-            "Status":    st.column_config.TextColumn("Status",   width="medium"),
-            "Desvio":    st.column_config.TextColumn("Desvio",   width="small"),
-            "Av.%":      st.column_config.ProgressColumn("Av.%", min_value=0, max_value=100, width="small"),
-        }
-    )
+        # ── SEM TAREFAS ───────────────────────────────────────
+        if not tarefas:
+            st.info("Esta obra ainda não possui tarefas.")
+            template = carregar_template()
+            if template and st.button("📋 Criar do Template", type="primary"):
+                supabase.table("obras_tarefas").insert([{
+                    "obra_id":obra_id,"item":str(t.get("item","")),
+                    "etapa":t.get("etapa"),"descricao":t.get("descricao"),
+                    "status":t.get("status_padrao") or "A Iniciar",
+                    "gut_gravidade":1,"gut_urgencia":1,"gut_tendencia":1,
+                    "gut_score":1,"avanco_percent":0,
+                } for t in template]).execute()
+                limpar_cache(); st.rerun()
+        else:
+            # ── APLICA FILTROS ────────────────────────────────────
+            tf = tarefas
+            if not f_conc:          tf = [t for t in tf if t["status"] not in ("Concluído","N/A")]
+            if f_etapa  != "Todas": tf = [t for t in tf if t.get("etapa") == f_etapa]
+            if f_status != "Todos": tf = [t for t in tf if t["status"] == f_status]
+            if f_resp   != "Todos": tf = [t for t in tf if (t.get("responsavel") or {}).get("nome") == f_resp]
+            if "Alto"   in f_gut:   tf = [t for t in tf if (t.get("gut_score") or 1) >= 75]
+            elif "Médio" in f_gut:  tf = [t for t in tf if 27 <= (t.get("gut_score") or 1) < 75]
+            elif "Baixo" in f_gut:  tf = [t for t in tf if (t.get("gut_score") or 1) < 27]
 
-    # ── FORMULÁRIO DE EDIÇÃO ──────────────────────────────
-    linhas_sel = sel.selection.rows if sel.selection else []
-    if linhas_sel:
-        idx = linhas_sel[0]
-        t   = tf[idx]
-        st.divider()
-        st.markdown(f"**✏️ Editando:** {t.get('descricao','')}")
+            # ── MONTA DATAFRAME ───────────────────────────────────
+            _hoje = date.today()   # calculado uma única vez para todo o loop
+            rows = []
+            for t in tf:
+                rows.append({
+                    "_id":        t["id"],
+                    "GUT":        gut_emoji(t.get("gut_score") or 1),
+                    "Etapa":      t.get("etapa") or "—",
+                    "Descrição":  f"{calcular_farol(t.get('entrega_prevista'), t['status'], _hoje)} {t.get('descricao') or '—'}",
+                    "Resp.":      (t.get("responsavel") or {}).get("nome","—"),
+                    "Status":     t["status"],
+                    "Desvio":     calcular_desvio(t.get("entrega_prevista"), t.get("entrega_real"), t["status"], _hoje),
+                    "Av.%":       t.get("avanco_percent") or 0,
+                })
 
-        resp_nome = (t.get("responsavel") or {}).get("nome","—")
+            df = pd.DataFrame(rows)
+            st.caption(f"**{len(df)}** tarefa(s) · clique em uma linha para editar")
 
-        ea,eb,ec = st.columns(3)
-        r_nome = ea.selectbox("R — Responsável", equipe_nomes,
-            index=equipe_nomes.index(resp_nome) if resp_nome in equipe_nomes else 0,
-            key=f"r_{t['id']}")
-        a_nome = eb.selectbox("A — Aprovador",  ["—"]+equipe_nomes, key=f"a_{t['id']}")
-        c_nome = ec.selectbox("C — Consultado", ["—"]+equipe_nomes, key=f"c_{t['id']}")
-        i_nome = ea.selectbox("I — Informado",  ["—"]+equipe_nomes, key=f"i_{t['id']}")
+            # ── TABELA NATIVA ─────────────────────────────────────
+            sel = st.dataframe(
+                df.drop(columns=["_id"]),
+                use_container_width=True,
+                hide_index=True,
+                height=min(400, 36 + 35 * len(df)),
+                on_select="rerun",
+                selection_mode="single-row",
+                column_config={
+                    "GUT":       st.column_config.TextColumn("GUT",      width="small"),
+                    "Etapa":     st.column_config.TextColumn("Etapa",    width="medium"),
+                    "Descrição": st.column_config.TextColumn("Descrição",width="large"),
+                    "Resp.":     st.column_config.TextColumn("Resp.",    width="medium"),
+                    "Status":    st.column_config.TextColumn("Status",   width="medium"),
+                    "Desvio":    st.column_config.TextColumn("Desvio",   width="small"),
+                    "Av.%":      st.column_config.ProgressColumn("Av.%", min_value=0, max_value=100, width="small"),
+                }
+            )
 
-        novo_status = eb.selectbox("Status", STATUS_OPCOES,
-            index=STATUS_OPCOES.index(t["status"]) if t["status"] in STATUS_OPCOES else 0,
-            key=f"st_{t['id']}")
-        novo_avanco = ec.slider("% Avanço",0,100,t.get("avanco_percent") or 0,
-            step=5, key=f"av_{t['id']}")
+            # ── FORMULÁRIO DE EDIÇÃO ──────────────────────────────
+            linhas_sel = sel.selection.rows if sel.selection else []
+            if linhas_sel:
+                idx = linhas_sel[0]
+                t   = tf[idx]
+                st.divider()
+                st.markdown(f"**✏️ Editando:** {t.get('descricao','')}")
 
-        novo_imp = t.get("impedimento") or ""
-        if novo_status == "Impedido":
-            novo_imp = st.text_input("🚧 Impedimento", value=novo_imp, key=f"imp_{t['id']}")
+                resp_nome = (t.get("responsavel") or {}).get("nome","—")
 
-        fd1,fd2,fd3 = st.columns(3)
-        novo_inicio  = fd1.date_input("Início",  value=parse_date(t.get("inicio_previsto")),  key=f"ini_{t['id']}",  format="DD/MM/YYYY")
-        novo_entrega = fd2.date_input("Entrega", value=parse_date(t.get("entrega_prevista")), key=f"ent_{t['id']}",  format="DD/MM/YYYY")
-        novo_real    = fd3.date_input("Real",    value=parse_date(t.get("entrega_real")),     key=f"real_{t['id']}", format="DD/MM/YYYY")
+                ea,eb,ec = st.columns(3)
+                r_nome = ea.selectbox("R — Responsável", equipe_nomes,
+                    index=equipe_nomes.index(resp_nome) if resp_nome in equipe_nomes else 0,
+                    key=f"r_{t['id']}")
+                a_nome = eb.selectbox("A — Aprovador",  ["—"]+equipe_nomes, key=f"a_{t['id']}")
+                c_nome = ec.selectbox("C — Consultado", ["—"]+equipe_nomes, key=f"c_{t['id']}")
+                i_nome = ea.selectbox("I — Informado",  ["—"]+equipe_nomes, key=f"i_{t['id']}")
 
-        gg1,gg2,gg3,gg4 = st.columns(4)
-        ng = gg1.slider("G",1,5,t.get("gut_gravidade") or 1, key=f"g_{t['id']}")
-        nu = gg2.slider("U",1,5,t.get("gut_urgencia")  or 1, key=f"u_{t['id']}")
-        nt = gg3.slider("T",1,5,t.get("gut_tendencia") or 1, key=f"te_{t['id']}")
-        gg4.metric("GUT", ng*nu*nt)
+                novo_status = eb.selectbox("Status", STATUS_OPCOES,
+                    index=STATUS_OPCOES.index(t["status"]) if t["status"] in STATUS_OPCOES else 0,
+                    key=f"st_{t['id']}")
+                novo_avanco = ec.slider("% Avanço",0,100,t.get("avanco_percent") or 0,
+                    step=5, key=f"av_{t['id']}")
 
-        novo_obs = st.text_area("Obs.", value=t.get("observacoes") or "",
-            key=f"obs_{t['id']}", height=50)
+                novo_imp = t.get("impedimento") or ""
+                if novo_status == "Impedido":
+                    novo_imp = st.text_input("🚧 Impedimento", value=novo_imp, key=f"imp_{t['id']}")
 
-        s1,s2 = st.columns([1,5])
-        if s1.button("💾 Salvar", type="primary", key=f"save_{t['id']}"):
-            supabase.table("obras_tarefas").update({
-                "responsavel_id":   equipe_ids.get(r_nome),
-                "aprovador_id":     equipe_ids.get(a_nome) if a_nome != "—" else None,
-                "consultado_id":    equipe_ids.get(c_nome) if c_nome != "—" else None,
-                "informado_id":     equipe_ids.get(i_nome) if i_nome != "—" else None,
-                "status":           novo_status,
-                "impedimento":      novo_imp or None,
-                "avanco_percent":   novo_avanco,
-                "inicio_previsto":  novo_inicio.isoformat()  if novo_inicio  else None,
-                "entrega_prevista": novo_entrega.isoformat() if novo_entrega else None,
-                "entrega_real":     novo_real.isoformat()    if novo_real    else None,
-                "gut_gravidade":    ng,"gut_urgencia":nu,"gut_tendencia":nt,
-                "gut_score":        ng*nu*nt,
-                "observacoes":      novo_obs or None,
-            }).eq("id",t["id"]).execute()
-            limpar_cache()
-            st.success("✅ Salvo!"); st.rerun()
+                fd1,fd2,fd3 = st.columns(3)
+                novo_inicio  = fd1.date_input("Início",  value=parse_date(t.get("inicio_previsto")),  key=f"ini_{t['id']}",  format="DD/MM/YYYY")
+                novo_entrega = fd2.date_input("Entrega", value=parse_date(t.get("entrega_prevista")), key=f"ent_{t['id']}",  format="DD/MM/YYYY")
+                novo_real    = fd3.date_input("Real",    value=parse_date(t.get("entrega_real")),     key=f"real_{t['id']}", format="DD/MM/YYYY")
+
+                gg1,gg2,gg3,gg4 = st.columns(4)
+                ng = gg1.slider("G",1,5,t.get("gut_gravidade") or 1, key=f"g_{t['id']}")
+                nu = gg2.slider("U",1,5,t.get("gut_urgencia")  or 1, key=f"u_{t['id']}")
+                nt = gg3.slider("T",1,5,t.get("gut_tendencia") or 1, key=f"te_{t['id']}")
+                gg4.metric("GUT", ng*nu*nt)
+
+                novo_obs = st.text_area("Obs.", value=t.get("observacoes") or "",
+                    key=f"obs_{t['id']}", height=50)
+
+                s1,s2 = st.columns([1,5])
+                if s1.button("💾 Salvar", type="primary", key=f"save_{t['id']}"):
+                    supabase.table("obras_tarefas").update({
+                        "responsavel_id":   equipe_ids.get(r_nome),
+                        "aprovador_id":     equipe_ids.get(a_nome) if a_nome != "—" else None,
+                        "consultado_id":    equipe_ids.get(c_nome) if c_nome != "—" else None,
+                        "informado_id":     equipe_ids.get(i_nome) if i_nome != "—" else None,
+                        "status":           novo_status,
+                        "impedimento":      novo_imp or None,
+                        "avanco_percent":   novo_avanco,
+                        "inicio_previsto":  novo_inicio.isoformat()  if novo_inicio  else None,
+                        "entrega_prevista": novo_entrega.isoformat() if novo_entrega else None,
+                        "entrega_real":     novo_real.isoformat()    if novo_real    else None,
+                        "gut_gravidade":    ng,"gut_urgencia":nu,"gut_tendencia":nt,
+                        "gut_score":        ng*nu*nt,
+                        "observacoes":      novo_obs or None,
+                    }).eq("id",t["id"]).execute()
+                    limpar_cache()
+                    st.success("✅ Salvo!"); st.rerun()
+
+    # ════════════════════════════════════════════════════════
+    # ABA EXTRAS — tarefas sem obra (obra_id IS NULL)
+    # ════════════════════════════════════════════════════════
+    with aba_extras:
+        extras_lista = carregar_tarefas_extras()
+        _hoje_e = date.today()
+
+        ef1, ef2, ef3 = st.columns([2,2,1])
+        f_ex_status = ef1.selectbox("Status", ["Ativos"] + STATUS_OPCOES,
+                                     key="f_ex_status", label_visibility="collapsed")
+        f_ex_resp   = ef2.selectbox("Resp.", ["Todos"] + equipe_nomes,
+                                     key="f_ex_resp", label_visibility="collapsed")
+        if ef3.button("🔄", key="btn_extras_refresh"):
+            carregar_tarefas_extras.clear(); st.rerun()
+
+        te = list(extras_lista)
+        if f_ex_status == "Ativos":
+            te = [t for t in te if t["status"] not in ("Concluído","N/A")]
+        elif f_ex_status != "Todos":
+            te = [t for t in te if t["status"] == f_ex_status]
+        if f_ex_resp != "Todos":
+            te = [t for t in te if (t.get("responsavel") or {}).get("nome") == f_ex_resp]
+
+        te = sorted(te, key=lambda t: (-(t.get("gut_score") or 1),
+                                        t.get("entrega_prevista") or "9999-99-99"))
+
+        st.caption(f"**{len(te)}** extra(s) · clique em uma linha para editar")
+
+        if not te:
+            st.info("Nenhuma tarefa extra para os filtros selecionados.")
+        else:
+            rows_ex = []
+            for t in te:
+                rows_ex.append({
+                    "_id":       t["id"],
+                    "GUT":       gut_emoji(t.get("gut_score") or 1),
+                    "Origem":    t.get("origem") or "—",
+                    "Descrição": f"{calcular_farol(t.get('entrega_prevista'), t['status'], _hoje_e)} {t.get('descricao') or '—'}",
+                    "Resp.":     (t.get("responsavel") or {}).get("nome","—"),
+                    "Status":    t["status"],
+                    "Desvio":    calcular_desvio(t.get("entrega_prevista"), t.get("entrega_real"), t["status"], _hoje_e),
+                    "Av.%":      t.get("avanco_percent") or 0,
+                })
+            df_ex = pd.DataFrame(rows_ex)
+            sel_ex = st.dataframe(
+                df_ex.drop(columns=["_id"]),
+                use_container_width=True, hide_index=True,
+                height=min(400, 36 + 35 * len(df_ex)),
+                on_select="rerun", selection_mode="single-row",
+                column_config={
+                    "GUT":       st.column_config.TextColumn("GUT", width="small"),
+                    "Origem":    st.column_config.TextColumn("Origem", width="medium"),
+                    "Descrição": st.column_config.TextColumn("Descrição", width="large"),
+                    "Resp.":     st.column_config.TextColumn("Resp.", width="medium"),
+                    "Status":    st.column_config.TextColumn("Status", width="medium"),
+                    "Desvio":    st.column_config.TextColumn("Desvio", width="small"),
+                    "Av.%":      st.column_config.ProgressColumn("Av.%", min_value=0, max_value=100, width="small"),
+                }
+            )
+            linhas_ex = sel_ex.selection.rows if sel_ex.selection else []
+            if linhas_ex:
+                te_sel = te[linhas_ex[0]]
+                st.divider()
+                st.markdown(f"**✏️ Extra:** {te_sel.get('descricao','')}")
+                xe1, xe2 = st.columns(2)
+                novo_st_ex = xe1.selectbox("Status", STATUS_OPCOES,
+                    index=STATUS_OPCOES.index(te_sel["status"]) if te_sel["status"] in STATUS_OPCOES else 0,
+                    key=f"ex_st_{te_sel['id']}")
+                novo_av_ex = xe2.slider("% Avanço", 0, 100,
+                    te_sel.get("avanco_percent") or 0, step=5, key=f"ex_av_{te_sel['id']}")
+                novo_imp_ex = te_sel.get("impedimento") or ""
+                if novo_st_ex == "Impedido":
+                    novo_imp_ex = st.text_input("🚧 Impedimento", value=novo_imp_ex,
+                                                 key=f"ex_imp_{te_sel['id']}")
+                xd1, xd2 = st.columns(2)
+                novo_ent_ex = xd1.date_input("Entrega prevista",
+                    value=parse_date(te_sel.get("entrega_prevista")),
+                    key=f"ex_ent_{te_sel['id']}", format="DD/MM/YYYY")
+                novo_real_ex = xd2.date_input("Entrega real",
+                    value=parse_date(te_sel.get("entrega_real")),
+                    key=f"ex_real_{te_sel['id']}", format="DD/MM/YYYY")
+                novo_obs_ex = st.text_area("Obs.", value=te_sel.get("observacoes") or "",
+                    key=f"ex_obs_{te_sel['id']}", height=50)
+                if st.button("💾 Salvar", type="primary", key=f"ex_save_{te_sel['id']}"):
+                    supabase.table("obras_tarefas").update({
+                        "status":           novo_st_ex,
+                        "impedimento":      novo_imp_ex or None,
+                        "avanco_percent":   novo_av_ex,
+                        "entrega_prevista": novo_ent_ex.isoformat()  if novo_ent_ex  else None,
+                        "entrega_real":     novo_real_ex.isoformat() if novo_real_ex else None,
+                        "observacoes":      novo_obs_ex or None,
+                    }).eq("id", te_sel["id"]).execute()
+                    limpar_cache(); st.success("✅ Salvo!"); st.rerun()
+
+    # ════════════════════════════════════════════════════════
+    # ABA DASHBOARD DA OBRA
+    # ════════════════════════════════════════════════════════
+    with aba_dash:
+        import plotly.graph_objects as _go
+        import plotly.express as _px
+
+        with st.spinner("Carregando dashboard..."):
+            _df_oc   = carregar_obras_completo()
+            _df_med  = carregar_medicoes_resumo()
+            _df_fab  = carregar_producao_resumo()
+            _df_tra  = carregar_transporte_resumo()
+            _df_mont = carregar_montagem_resumo()
+
+        # Linha da obra selecionada
+        _obra_rows = _df_oc[_df_oc["id"] == obra_id]
+        if _obra_rows.empty:
+            st.info("Dados financeiros não disponíveis para esta obra. Importe a rota 12.")
+        else:
+            _orow = _obra_rows.iloc[0]
+
+            # ── Cabeçalho ─────────────────────────────────────
+            _ch1, _ch2 = st.columns([3, 2])
+            with _ch1:
+                _st_icon = {"Em Andamento":"🔵","Concluída":"🟢","Cancelada":"🔴","Proposta":"🟡"}.get(_orow.get("status",""),"⚪")
+                st.markdown(
+                    f"### {_orow.get('codigo','?')} — {_orow.get('nome','?')}\n"
+                    f"{_st_icon} **{_orow.get('status','—')}** "
+                    f"· {_orow.get('modalidade','—')} "
+                    f"· {_orow.get('cliente','—') or '—'}")
+
+            _fat_tot = float(_orow.get("faturamento_total") or 0)
+            _med_obra = _df_med[_df_med["obra_id"] == obra_id]["valor"].sum() if not _df_med.empty else 0.0
+            _saldo_o = _fat_tot - _med_obra
+            _pct_fin = _med_obra / _fat_tot if _fat_tot > 0 else 0.0
+            with _ch2:
+                _cm1, _cm2, _cm3 = st.columns(3)
+                _cm1.metric("💼 Contratado",  fmt_brl(_fat_tot))
+                _cm2.metric("✅ Faturado",     fmt_brl(_med_obra))
+                _cm3.metric("📋 Saldo",        fmt_brl(_saldo_o))
+
+            st.progress(min(_pct_fin, 1.0), text=f"Avanço financeiro: {_pct_fin*100:.1f}%")
+
+            st.divider()
+
+            # ── Avanço físico ─────────────────────────────────
+            st.markdown("#### 📐 Avanço físico")
+            _dfb_o  = _df_fab[_df_fab["obra_id"]  == obra_id] if not _df_fab.empty  else pd.DataFrame()
+            _dft_o  = _df_tra[_df_tra["obra_id"]  == obra_id] if not _df_tra.empty  else pd.DataFrame()
+            _dfm_o  = _df_mont[_df_mont["obra_id"] == obra_id] if not _df_mont.empty else pd.DataFrame()
+
+            _vfab  = float(_dfb_o["volume_teorico"].sum())  if not _dfb_o.empty  else 0.0
+            _vtra  = float(_dft_o["volume_real"].sum())     if not _dft_o.empty  else 0.0
+            _vmon  = float(_dfm_o["volume_teorico"].sum())  if not _dfm_o.empty  else 0.0
+            _vref  = volume_ref(_orow)
+
+            _pa1, _pa2, _pa3 = st.columns(3)
+            for _col, _lbl, _vol in [(_pa1,"🏭 Fabricação",_vfab),
+                                      (_pa2,"🚛 Expedição", _vtra),
+                                      (_pa3,"🏗️ Montagem",  _vmon)]:
+                with _col:
+                    st.metric(_lbl, f"{_vol:,.1f} m³".replace(",","."))
+                    if _vref > 0:
+                        _pct_v = min(_vol / _vref, 1.0)
+                        st.progress(_pct_v)
+                        st.caption(f"{_vol/_vref*100:.1f}% do contrato ({_vref:,.1f} m³)".replace(",","."))
+                    else:
+                        st.progress(0.0)
+                        st.caption("Volume de ref. não disponível")
+
+            st.caption(
+                f"📦 Pátio: {max(0,_vfab-_vtra):,.1f} m³  "
+                f"| 🏚️ Canteiro: {max(0,_vtra-_vmon):,.1f} m³".replace(",","."))
+
+            st.divider()
+
+            # ── Evolução mensal (3 séries) ────────────────────
+            st.markdown("#### 📈 Evolução mensal (m³)")
+            if not _dfb_o.empty or not _dft_o.empty or not _dfm_o.empty:
+                _fab_m  = _dfb_o.groupby("mes")["volume_teorico"].sum() if not _dfb_o.empty else pd.Series(dtype=float)
+                _tra_m  = _dft_o.groupby("mes")["volume_real"].sum()    if not _dft_o.empty else pd.Series(dtype=float)
+                _mon_m  = _dfm_o.groupby("mes")["volume_teorico"].sum() if not _dfm_o.empty else pd.Series(dtype=float)
+                _todos_m = sorted(set(list(_fab_m.index)+list(_tra_m.index)+list(_mon_m.index)))
+                _todos_m = [m for m in _todos_m if m and m not in ("NaT","nan")]
+                if _todos_m:
+                    _ev_df = pd.DataFrame({"mes": _todos_m})
+                    _ev_df["Fabricação"] = _ev_df["mes"].map(_fab_m).fillna(0)
+                    _ev_df["Expedição"]  = _ev_df["mes"].map(_tra_m).fillna(0)
+                    _ev_df["Montagem"]   = _ev_df["mes"].map(_mon_m).fillna(0)
+                    _fig_ev = _go.Figure()
+                    for _nm, _cor in [("Fabricação","#1976D2"),("Expedição","#43A047"),("Montagem","#E53935")]:
+                        _fig_ev.add_trace(_go.Scatter(
+                            x=_ev_df["mes"], y=_ev_df[_nm],
+                            mode="lines+markers", name=_nm,
+                            line=dict(color=_cor, width=2),
+                            hovertemplate=f"<b>{_nm}</b>: %{{y:,.1f}} m³<extra></extra>"))
+                    _fig_ev.update_layout(
+                        yaxis=dict(title="m³", tickformat=",.0f"),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                        margin=dict(t=50,b=20), height=280, hovermode="x unified")
+                    st.plotly_chart(_fig_ev, use_container_width=True, key="dash_ev_obra")
+            else:
+                st.info("Sem dados de produção para esta obra.")
+
+            st.divider()
+
+            # ── Tipologia de produtos ─────────────────────────
+            st.subheader("🔍 Tipologia de Produtos")
+            _tp_fab, _tp_exp, _tp_mon = st.tabs(["Fabricação","Expedição","Montagem"])
+
+            with _tp_fab:
+                if not _dfb_o.empty:
+                    _pf = (_dfb_o.groupby("produto").agg(
+                        volume=("volume_teorico","sum"),
+                        frouxo=("peso_aco_frouxo","sum"),
+                        protendido=("peso_aco_protendido","sum"),
+                    ).reset_index().sort_values("volume", ascending=False))
+                    _pf["kg_m3"] = (_pf["frouxo"] + _pf["protendido"]) / _pf["volume"].replace(0, float("nan"))
+                    _tf1, _tf2 = st.columns(2)
+                    with _tf1:
+                        _fig_pf = _go.Figure(_go.Bar(
+                            x=_pf["volume"], y=_pf["produto"], orientation="h",
+                            marker_color="#1976D2",
+                            hovertemplate="%{y}: %{x:,.1f} m³<extra></extra>"))
+                        _fig_pf.update_layout(
+                            xaxis=dict(title="m³", tickformat=",.0f"),
+                            yaxis=dict(autorange="reversed"),
+                            margin=dict(t=10,b=10,r=10), height=300)
+                        st.plotly_chart(_fig_pf, use_container_width=True, key="dash_prod_fab")
+                    with _tf2:
+                        st.dataframe(
+                            _pf[["produto","volume","frouxo","protendido","kg_m3"]].rename(columns={
+                                "produto":"Produto","volume":"Vol m³",
+                                "frouxo":"Frouxo kg","protendido":"Prot. kg","kg_m3":"kg/m³"}),
+                            use_container_width=True, hide_index=True, height=300)
+                else:
+                    st.info("Sem dados de fabricação para esta obra.")
+
+            with _tp_exp:
+                if not _dft_o.empty:
+                    _pe = (_dft_o.groupby("produto")["volume_real"].sum()
+                           .reset_index().sort_values("volume_real", ascending=False))
+                    _fig_pe = _go.Figure(_go.Bar(
+                        x=_pe["volume_real"], y=_pe["produto"], orientation="h",
+                        marker_color="#43A047",
+                        hovertemplate="%{y}: %{x:,.1f} m³<extra></extra>"))
+                    _fig_pe.update_layout(
+                        xaxis=dict(title="m³ expedido", tickformat=",.0f"),
+                        yaxis=dict(autorange="reversed"),
+                        margin=dict(t=10,b=10,r=10), height=280)
+                    st.plotly_chart(_fig_pe, use_container_width=True, key="dash_prod_exp")
+                else:
+                    st.info("Sem dados de expedição para esta obra.")
+
+            with _tp_mon:
+                if not _dfm_o.empty:
+                    _pm = (_dfm_o.groupby("produto")["volume_teorico"].sum()
+                           .reset_index().sort_values("volume_teorico", ascending=False))
+                    _fig_pm = _go.Figure(_go.Bar(
+                        x=_pm["volume_teorico"], y=_pm["produto"], orientation="h",
+                        marker_color="#E53935",
+                        hovertemplate="%{y}: %{x:,.1f} m³<extra></extra>"))
+                    _fig_pm.update_layout(
+                        xaxis=dict(title="m³ montado", tickformat=",.0f"),
+                        yaxis=dict(autorange="reversed"),
+                        margin=dict(t=10,b=10,r=10), height=280)
+                    st.plotly_chart(_fig_pm, use_container_width=True, key="dash_prod_mon")
+                else:
+                    st.info("Sem dados de montagem para esta obra.")
+
+            st.divider()
+
+            # ── % expedido e montado por produto ─────────────
+            if not _dfb_o.empty:
+                st.markdown("#### 📊 Avanço por produto")
+                _fab_prod = _dfb_o.groupby("produto")["volume_teorico"].sum()
+                _tra_prod = _dft_o.groupby("produto")["volume_real"].sum() if not _dft_o.empty else pd.Series(dtype=float)
+                _mon_prod = _dfm_o.groupby("produto")["volume_teorico"].sum() if not _dfm_o.empty else pd.Series(dtype=float)
+                _prods = sorted(_fab_prod.index)
+                _rows_av = []
+                for _p in _prods:
+                    _f = float(_fab_prod.get(_p, 0))
+                    _t = float(_tra_prod.get(_p, 0))
+                    _m = float(_mon_prod.get(_p, 0))
+                    _rows_av.append({
+                        "Produto":  _p,
+                        "Fab m³":   round(_f, 1),
+                        "Exp m³":   round(_t, 1),
+                        "Mont m³":  round(_m, 1),
+                        "% Exp":    min(round(_t / _f * 100, 1) if _f else 0, 100.0),
+                        "% Mont":   min(round(_m / _f * 100, 1) if _f else 0, 100.0),
+                    })
+                _df_av = pd.DataFrame(_rows_av).sort_values("Fab m³", ascending=False)
+                st.dataframe(
+                    _df_av,
+                    use_container_width=True, hide_index=True,
+                    height=min(400, 36 + 35 * len(_df_av)),
+                    column_config={
+                        "% Exp":  st.column_config.ProgressColumn("% Expedido", min_value=0, max_value=100),
+                        "% Mont": st.column_config.ProgressColumn("% Montado",  min_value=0, max_value=100),
+                    })
 
 # ==========================================================
 # PÁGINA: REUNIÃO 1:1
@@ -1931,17 +2459,17 @@ elif pagina_selecionada == "🏭 Produção":
             return rows
 
         try:
-            rows = _query("obra_id, peca, produto, etapa, volume_total, peso_aco,"
-                          " peso_aco_frouxo, peso_aco_protendido, data_fabricacao")
+            rows = _query("obra_id, peca, produto, etapa, volume_teorico, volume_total,"
+                          " peso_aco, peso_aco_frouxo, peso_aco_protendido, data_fabricacao")
         except Exception:
-            rows = _query("obra_id, peca, produto, etapa, volume_total, peso_aco, data_fabricacao")
+            rows = _query("obra_id, peca, produto, etapa, volume_teorico, volume_total, peso_aco, data_fabricacao")
 
         df = pd.DataFrame(rows)
         if df.empty: return df
         # Elimina duplicatas de reimportação (mesma peça, mesma obra)
         if "peca" in df.columns:
             df = df.drop_duplicates(subset=["obra_id", "peca"])
-        for col in ["volume_total", "peso_aco", "peso_aco_frouxo", "peso_aco_protendido"]:
+        for col in ["volume_teorico", "volume_total", "peso_aco", "peso_aco_frouxo", "peso_aco_protendido"]:
             if col not in df.columns:
                 df[col] = 0.0
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
@@ -2142,9 +2670,9 @@ elif pagina_selecionada == "🏭 Produção":
     # ABA 1 — PRODUÇÃO
     # ════════════════════════════════════════════════════════
     with tab1:
-        vol_fab = df_fab_f["volume_total"].sum() if not df_fab_f.empty else 0
-        vol_exp = df_tra_f["volume_real"].sum()  if not df_tra_f.empty else 0
-        vol_mon = df_mon_f["volume_total"].sum() if not df_mon_f.empty else 0
+        vol_fab = df_fab_f["volume_teorico"].sum() if not df_fab_f.empty else 0
+        vol_exp = df_tra_f["volume_real"].sum()    if not df_tra_f.empty else 0
+        vol_mon = df_mon_f["volume_total"].sum()   if not df_mon_f.empty else 0
         gap_pat = max(0.0, vol_fab - vol_exp)
         gap_can = max(0.0, vol_exp - vol_mon)
 
@@ -2221,9 +2749,9 @@ elif pagina_selecionada == "🏭 Produção":
             g.columns = ["mes", label]
             return g
 
-        df_ev_fab = agg_mes(df_fab_f, "volume_total", "Fabricação")
-        df_ev_tra = agg_mes(df_tra_f, "volume_real",  "Expedição")
-        df_ev_mon = agg_mes(df_mon_f, "volume_total", "Montagem")
+        df_ev_fab = agg_mes(df_fab_f, "volume_teorico", "Fabricação")
+        df_ev_tra = agg_mes(df_tra_f, "volume_real",   "Expedição")
+        df_ev_mon = agg_mes(df_mon_f, "volume_total",  "Montagem")
 
         todos_meses = sorted(set(
             list(df_ev_fab["mes"]) + list(df_ev_tra["mes"]) + list(df_ev_mon["mes"])))
@@ -2261,7 +2789,7 @@ elif pagina_selecionada == "🏭 Produção":
         # ── Bloco C — Situação por obra ────────────────────
         st.markdown("#### 🏗️ Situação por obra")
 
-        fab_obra = (df_fab_f.groupby("obra_id")["volume_total"].sum()
+        fab_obra = (df_fab_f.groupby("obra_id")["volume_teorico"].sum()
                     if not df_fab_f.empty else pd.Series(dtype=float))
         tra_obra = (df_tra_f.groupby("obra_id")["volume_real"].sum()
                     if not df_tra_f.empty else pd.Series(dtype=float))
@@ -2314,7 +2842,7 @@ elif pagina_selecionada == "🏭 Produção":
         with l4a:
             st.subheader("Top 10 produtos fabricados (m³)")
             if not df_fab_f.empty:
-                top_prod = (df_fab_f.groupby("produto")["volume_total"]
+                top_prod = (df_fab_f.groupby("produto")["volume_teorico"]
                             .sum().sort_values(ascending=True).tail(10).reset_index())
                 top_prod.columns = ["produto", "volume"]
                 top_prod = top_prod[top_prod["volume"] > 0]
@@ -2334,13 +2862,13 @@ elif pagina_selecionada == "🏭 Produção":
         with l4b:
             st.subheader("Volume por etapa construtiva")
             if not df_fab_f.empty:
-                etapa_vol = (df_fab_f.groupby("etapa")["volume_total"]
+                etapa_vol = (df_fab_f.groupby("etapa")["volume_teorico"]
                              .sum().sort_values(ascending=False).reset_index())
-                etapa_vol = etapa_vol[etapa_vol["volume_total"] > 0]
+                etapa_vol = etapa_vol[etapa_vol["volume_teorico"] > 0]
                 if not etapa_vol.empty:
                     fig_etapa = go.Figure(go.Pie(
                         labels=etapa_vol["etapa"],
-                        values=etapa_vol["volume_total"],
+                        values=etapa_vol["volume_teorico"],
                         hole=0.4,
                         textinfo="label+percent",
                         textposition="outside",
@@ -2377,7 +2905,7 @@ elif pagina_selecionada == "🏭 Produção":
                 df_cp_f = df_cp_f[df_cp_f["data"] <= fim_str]
 
             # Volume fabricado por mês (filtrado por obras)
-            vol_mes_fab = (df_fab_f.groupby("mes")["volume_total"].sum()
+            vol_mes_fab = (df_fab_f.groupby("mes")["volume_teorico"].sum()
                            if not df_fab_f.empty else pd.Series(dtype=float))
 
             # Custo mensal (abs — despesas em negativo no sistema)
