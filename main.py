@@ -1090,193 +1090,229 @@ elif pagina_selecionada == "💰 Financeiro":
     def fmt_brl(v):
         if pd.isna(v) or v == 0:
             return "R$ 0"
-        return "R$ " + f"{v:,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        sinal = "-" if v < 0 else ""
+        return f"{sinal}R$ " + f"{abs(v):,.0f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
     def curva_abc(df_in, col_grupo, col_valor):
-        g = (df_in.groupby(col_grupo)[col_valor]
-             .sum().sort_values(ascending=False).reset_index())
+        """ABC por valor absoluto — funciona com despesas negativas ou positivas."""
+        g = df_in.groupby(col_grupo)[col_valor].sum().reset_index()
         g.columns = ["nome", "valor"]
-        g = g[g["valor"] > 0].copy()
-        total       = g["valor"].sum()
-        g["pct"]    = g["valor"] / total * 100
+        g["abs_v"] = g["valor"].abs()
+        g = g[g["abs_v"] > 0].copy().sort_values("abs_v", ascending=False).reset_index(drop=True)
+        total       = g["abs_v"].sum()
+        g["pct"]    = g["abs_v"] / total * 100
         g["cum_pct"]= g["pct"].cumsum()
         g["classe"] = g["cum_pct"].apply(
             lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C"))
-        return g
+        return g.drop(columns="abs_v")
 
     CORES_ABC = {"A": "#EF5350", "B": "#FFA726", "C": "#66BB6A"}
 
+    def plot_abc(df_abc, key):
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=df_abc["nome"], y=df_abc["valor"],
+            marker_color=[CORES_ABC[c] for c in df_abc["classe"]],
+            name="Valor",
+            hovertemplate="%{x}<br>R$ %{y:,.0f}<extra></extra>"))
+        fig.add_trace(go.Scatter(
+            x=df_abc["nome"], y=df_abc["cum_pct"],
+            yaxis="y2", mode="lines+markers", name="Acumulado %",
+            line=dict(color="#1A237E", width=2),
+            hovertemplate="%{y:.1f}%<extra></extra>"))
+        fig.update_layout(
+            yaxis=dict(tickformat=",.0f", tickprefix="R$ "),
+            yaxis2=dict(overlaying="y", side="right",
+                        range=[0, 105], ticksuffix="%", showgrid=False),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+            margin=dict(t=50, b=70), height=360,
+            xaxis=dict(tickangle=-40))
+        st.plotly_chart(fig, use_container_width=True, key=key)
+
+    def tbl_abc(df_abc, col_nome):
+        tbl = df_abc.copy()
+        tbl["Valor"] = tbl["valor"].apply(fmt_brl)
+        tbl["%"]     = tbl["pct"].apply(lambda x: f"{x:.1f}%")
+        tbl["Acum."] = tbl["cum_pct"].apply(lambda x: f"{x:.1f}%")
+        st.dataframe(
+            tbl[["classe","nome","Valor","%","Acum."]].rename(
+                columns={"classe":"Classe","nome":col_nome}),
+            use_container_width=True, hide_index=True, height=230)
+
     # ── CARREGA ────────────────────────────────────────────
     df_custos = carregar_custos()
-
     st.header("💰 Dashboard de Custos")
 
     if df_custos.empty:
         st.warning("Nenhum dado encontrado. Importe os arquivos na seção Importador.")
         st.stop()
 
-    # ── FILTROS NO TOPO ────────────────────────────────────
+    # Listas globais de opções
     meses_disp = sorted(df_custos["mes"].dropna().unique(), reverse=True)
-    categorias = sorted(df_custos["conta_macro"].dropna().unique())
-    centros    = sorted(df_custos["centro_custos"].dropna().unique())
+    categorias = sorted(df_custos["conta_macro"].fillna("—").unique())
+    centros    = sorted(df_custos["centro_custos"].fillna("—").unique())
 
-    fc1, fc2, fc3, fc4 = st.columns([2, 3, 3, 1])
-    sel_mes    = fc1.selectbox("Mês", meses_disp, index=0, key="fin_mes",
-                                label_visibility="collapsed")
-    sel_cat    = fc2.multiselect("Categoria", categorias, default=categorias,
-                                  key="fin_cat", placeholder="Todas as categorias")
-    sel_centro = fc3.multiselect("Centro de Custo", centros, default=centros,
-                                  key="fin_centro", placeholder="Todos os centros")
-    if fc4.button("🔄", key="btn_fin_refresh", help="Atualizar dados"):
+    # Índice dos meses para navegação
+    meses_ord = sorted(df_custos["mes"].dropna().unique())
+
+    # ── FILTRO GLOBAL: Mês ──────────────────────────────────
+    fh1, fh2 = st.columns([4, 1])
+    sel_mes = fh1.selectbox("Mês de referência", meses_disp, index=0, key="fin_mes")
+    if fh2.button("🔄 Atualizar", key="btn_fin_refresh"):
         carregar_custos.clear(); st.rerun()
 
-    # ── APLICA FILTROS ─────────────────────────────────────
-    cat_filtro    = sel_cat    if sel_cat    else categorias
-    centro_filtro = sel_centro if sel_centro else centros
-    df_f = df_custos[
-        df_custos["conta_macro"].isin(cat_filtro) &
-        df_custos["centro_custos"].isin(centro_filtro)
-    ].copy()
-
-    meses_ord = sorted(df_f["mes"].dropna().unique())
     idx_atual = meses_ord.index(sel_mes) if sel_mes in meses_ord else len(meses_ord) - 1
     mes_atual = meses_ord[idx_atual]
     mes_ant   = meses_ord[idx_atual - 1] if idx_atual > 0 else None
 
-    df_atual = df_f[df_f["mes"] == mes_atual]
-    df_ant   = df_f[df_f["mes"] == mes_ant] if mes_ant else pd.DataFrame()
+    df_mes     = df_custos[df_custos["mes"] == mes_atual]
+    df_mes_ant = df_custos[df_custos["mes"] == mes_ant] if mes_ant else pd.DataFrame()
 
-    total_atual = df_atual["valor_global"].sum()
-    total_ant   = df_ant["valor_global"].sum() if not df_ant.empty else 0
-    var_pct     = (total_atual - total_ant) / total_ant * 100 if total_ant else 0
-    n_lanc      = len(df_atual)
+    # ── NÍVEL 1: MÉTRICAS (dados completos do mês) ─────────
+    total_atual = df_mes["valor_global"].sum()
+    total_ant   = df_mes_ant["valor_global"].sum() if not df_mes_ant.empty else 0
+    var_pct     = (total_atual - total_ant) / abs(total_ant) * 100 if total_ant else 0
 
-    # ── NÍVEL 1: MÉTRICAS ──────────────────────────────────
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("💰 Total do mês",  fmt_brl(total_atual))
     m2.metric("📅 Mês anterior",  fmt_brl(total_ant))
     delta_txt = f"{var_pct:+.1f}%"
-    m3.metric("📈 Variação",      delta_txt,
-              delta=delta_txt, delta_color="inverse")
-    m4.metric("📄 Lançamentos",   f"{n_lanc:,}".replace(",", "."))
+    m3.metric("📈 Variação",      delta_txt, delta=delta_txt, delta_color="inverse")
+    m4.metric("📄 Lançamentos",   f"{len(df_mes):,}".replace(",", "."))
 
     st.divider()
 
-    # ── NÍVEL 2: EVOLUÇÃO 12 MESES + COMPARATIVO ──────────
-    meses_12 = meses_ord[-12:]
-    df_12    = df_f[df_f["mes"].isin(meses_12)]
+    # ── NÍVEL 2: EVOLUÇÃO + COMPARATIVO ───────────────────
+    st.markdown("#### 📅 Evolução temporal")
+    e2a, e2b, e2c = st.columns([3, 3, 1])
+    ev_cat    = e2a.multiselect("Categorias", categorias, key="ev_cat",
+                                 placeholder="Todas as categorias")
+    ev_centro = e2b.multiselect("Centro de custo", centros, key="ev_centro",
+                                 placeholder="Todos os centros")
+    ev_meses  = e2c.number_input("Meses", 3, 24, 12, key="ev_meses", step=1)
+
+    ev_cat_f    = ev_cat    if ev_cat    else categorias
+    ev_centro_f = ev_centro if ev_centro else centros
+    df_ev = df_custos[
+        df_custos["conta_macro"].isin(ev_cat_f) &
+        df_custos["centro_custos"].isin(ev_centro_f)
+    ]
+    meses_ev = sorted(df_ev["mes"].dropna().unique())
+    df_12    = df_ev[df_ev["mes"].isin(meses_ev[-int(ev_meses):])]
 
     l2a, l2b = st.columns(2)
-
     with l2a:
-        st.subheader("Evolução 12 meses por categoria")
-        df_evol = (df_12.groupby(["mes","conta_macro"])["valor_global"]
-                   .sum().reset_index())
-        fig_evol = px.bar(
-            df_evol, x="mes", y="valor_global", color="conta_macro",
-            barmode="stack",
-            labels={"mes":"","valor_global":"R$","conta_macro":""},
-            color_discrete_sequence=px.colors.qualitative.Set2)
+        st.subheader("Evolução empilhada")
+        df_evol = df_12.groupby(["mes","conta_macro"])["valor_global"].sum().reset_index()
+        fig_evol = px.bar(df_evol, x="mes", y="valor_global", color="conta_macro",
+                          barmode="stack",
+                          labels={"mes":"","valor_global":"R$","conta_macro":""},
+                          color_discrete_sequence=px.colors.qualitative.Set2)
         fig_evol.update_layout(
             yaxis_tickformat=",.0f", yaxis_tickprefix="R$ ",
             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
             margin=dict(t=50, b=20), height=340)
-        fig_evol.update_traces(hovertemplate="%{x}<br>%{fullData.name}<br>R$ %{y:,.0f}<extra></extra>")
-        st.plotly_chart(fig_evol, use_container_width=True)
+        fig_evol.update_traces(
+            hovertemplate="%{x}<br>%{fullData.name}<br>R$ %{y:,.0f}<extra></extra>")
+        st.plotly_chart(fig_evol, use_container_width=True, key="chart_evol")
 
     with l2b:
-        st.subheader(f"{mes_atual} vs {mes_ant or '—'} por categoria")
-        if mes_ant:
-            comp_a = df_atual.groupby("conta_macro")["valor_global"].sum().rename("atual")
-            comp_b = df_ant.groupby("conta_macro")["valor_global"].sum().rename("anterior")
-            df_comp = (pd.concat([comp_a, comp_b], axis=1)
-                       .fillna(0).reset_index()
-                       .melt("conta_macro", var_name="período", value_name="valor"))
-            fig_comp = px.bar(
-                df_comp, x="conta_macro", y="valor", color="período",
-                barmode="group",
-                labels={"conta_macro":"","valor":"R$","período":""},
-                color_discrete_map={"atual":"#1976D2","anterior":"#90CAF9"})
+        st.subheader(f"{mes_atual} vs {mes_ant or '—'}")
+        comp_a = df_ev[df_ev["mes"] == mes_atual].groupby("conta_macro")["valor_global"].sum().rename("atual")
+        comp_b = (df_ev[df_ev["mes"] == mes_ant].groupby("conta_macro")["valor_global"].sum().rename("anterior")
+                  if mes_ant else pd.Series(name="anterior", dtype=float))
+        df_comp = (pd.concat([comp_a, comp_b], axis=1)
+                   .fillna(0).reset_index()
+                   .melt("conta_macro", var_name="período", value_name="valor"))
+        if mes_ant and not df_comp.empty:
+            fig_comp = px.bar(df_comp, x="conta_macro", y="valor", color="período",
+                              barmode="group",
+                              labels={"conta_macro":"","valor":"R$","período":""},
+                              color_discrete_map={"atual":"#1976D2","anterior":"#90CAF9"})
             fig_comp.update_layout(
                 yaxis_tickformat=",.0f", yaxis_tickprefix="R$ ",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
                 margin=dict(t=50, b=20), height=340, xaxis_tickangle=-25)
             fig_comp.update_traces(hovertemplate="%{x}<br>R$ %{y:,.0f}<extra></extra>")
-            st.plotly_chart(fig_comp, use_container_width=True)
+            st.plotly_chart(fig_comp, use_container_width=True, key="chart_comp")
         else:
-            st.info("Não há mês anterior para comparar com os filtros aplicados.")
+            st.info("Sem mês anterior para comparar.")
 
     st.divider()
 
     # ── NÍVEL 3: ABC CONTA GERENCIAL + ROSCA ──────────────
-    l3a, l3b = st.columns(2)
+    st.markdown("#### 🔍 Concentração de custos")
+    a3a, a3b, a3c = st.columns([3, 3, 1])
+    abc_cat    = a3a.multiselect("Categorias", categorias, key="abc_cat",
+                                  placeholder="Todas as categorias")
+    abc_centro = a3b.multiselect("Centro de custo", centros, key="abc_centro",
+                                  placeholder="Todos os centros")
+    abc_top_n  = a3c.number_input("Top N contas", 5, 100, 20, key="abc_topn", step=5)
 
+    abc_cat_f    = abc_cat    if abc_cat    else categorias
+    abc_centro_f = abc_centro if abc_centro else centros
+    df_abc_base  = df_mes[
+        df_mes["conta_macro"].isin(abc_cat_f) &
+        df_mes["centro_custos"].isin(abc_centro_f)
+    ]
+
+    l3a, l3b = st.columns(2)
     with l3a:
         st.subheader("Curva ABC — Conta Gerencial")
-        abc_cg = curva_abc(df_atual, "conta_gerencial", "valor_global")
+        abc_cg = curva_abc(df_abc_base, "conta_gerencial", "valor_global").head(int(abc_top_n))
         if not abc_cg.empty:
-            fig_abc = go.Figure()
-            fig_abc.add_trace(go.Bar(
-                x=abc_cg["nome"], y=abc_cg["valor"],
-                marker_color=[CORES_ABC[c] for c in abc_cg["classe"]],
-                name="Valor",
-                hovertemplate="%{x}<br>R$ %{y:,.0f}<extra></extra>"))
-            fig_abc.add_trace(go.Scatter(
-                x=abc_cg["nome"], y=abc_cg["cum_pct"],
-                yaxis="y2", mode="lines+markers", name="Acumulado %",
-                line=dict(color="#1A237E", width=2),
-                hovertemplate="%{y:.1f}%<extra></extra>"))
-            fig_abc.update_layout(
-                yaxis=dict(tickformat=",.0f", tickprefix="R$ "),
-                yaxis2=dict(overlaying="y", side="right",
-                            range=[0, 105], ticksuffix="%", showgrid=False),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-                margin=dict(t=50, b=70), height=340,
-                xaxis=dict(tickangle=-40, showticklabels=True))
-            st.plotly_chart(fig_abc, use_container_width=True)
-
-            tbl = abc_cg.copy()
-            tbl["Valor"] = tbl["valor"].apply(fmt_brl)
-            tbl["%"]     = tbl["pct"].apply(lambda x: f"{x:.1f}%")
-            tbl["Acum."] = tbl["cum_pct"].apply(lambda x: f"{x:.1f}%")
-            st.dataframe(
-                tbl[["classe","nome","Valor","%","Acum."]].rename(
-                    columns={"classe":"Classe","nome":"Conta Gerencial"}),
-                use_container_width=True, hide_index=True, height=230)
+            plot_abc(abc_cg, key="chart_abc_cg")
+            tbl_abc(abc_cg, "Conta Gerencial")
+        else:
+            st.info("Sem dados para o filtro selecionado.")
 
     with l3b:
         st.subheader("Distribuição por Categoria")
-        df_cat = (df_atual.groupby("conta_macro")["valor_global"]
-                  .sum().reset_index())
-        df_cat = df_cat[df_cat["valor_global"] > 0]
+        df_cat = df_abc_base.groupby("conta_macro")["valor_global"].sum().reset_index()
+        df_cat["abs_v"] = df_cat["valor_global"].abs()
+        df_cat = df_cat[df_cat["abs_v"] > 0]
         if not df_cat.empty:
             fig_pie = go.Figure(go.Pie(
                 labels=df_cat["conta_macro"],
-                values=df_cat["valor_global"],
+                values=df_cat["abs_v"],
                 hole=0.42,
                 textinfo="label+percent",
                 textposition="outside",
                 hovertemplate="%{label}<br>R$ %{value:,.0f}<br>%{percent}<extra></extra>",
                 marker=dict(colors=px.colors.qualitative.Set2)))
             fig_pie.update_layout(
-                showlegend=False,
-                margin=dict(t=30, b=30, l=30, r=30),
-                height=430)
-            st.plotly_chart(fig_pie, use_container_width=True)
+                showlegend=False, margin=dict(t=30, b=30, l=30, r=30), height=450)
+            st.plotly_chart(fig_pie, use_container_width=True, key="chart_pie")
+        else:
+            st.info("Sem dados para o filtro selecionado.")
 
     st.divider()
 
     # ── NÍVEL 4: TOP N FORNECEDORES + ABC ─────────────────
-    top_n = st.slider("Top N fornecedores", 5, 50, 15, key="fin_topn",
-                       label_visibility="collapsed")
+    st.markdown("#### 🏭 Análise de fornecedores")
+    f4a, f4b, f4c = st.columns([3, 3, 1])
+    forn_cat    = f4a.multiselect("Categorias", categorias, key="forn_cat",
+                                   placeholder="Todas as categorias")
+    forn_centro = f4b.multiselect("Centro de custo", centros, key="forn_centro",
+                                   placeholder="Todos os centros")
+    forn_top_n  = f4c.number_input("Top N", 5, 100, 15, key="forn_topn", step=5)
+
+    forn_cat_f    = forn_cat    if forn_cat    else categorias
+    forn_centro_f = forn_centro if forn_centro else centros
+    df_forn_base  = df_mes[
+        df_mes["conta_macro"].isin(forn_cat_f) &
+        df_mes["centro_custos"].isin(forn_centro_f)
+    ]
 
     l4a, l4b = st.columns(2)
-
     with l4a:
-        st.subheader(f"Top {top_n} Fornecedores")
-        df_forn = (df_atual.groupby("cli_fornecedor")["valor_global"]
-                   .sum().sort_values(ascending=False)
-                   .head(top_n).reset_index())
+        st.subheader(f"Top {int(forn_top_n)} Fornecedores")
+        # ascending=True → mais negativo (maior custo) aparece primeiro
+        df_forn = (df_forn_base.groupby("cli_fornecedor")["valor_global"]
+                   .sum()
+                   .sort_values(ascending=True)
+                   .head(int(forn_top_n))
+                   .reset_index())
         df_forn.columns = ["fornecedor", "valor"]
         if not df_forn.empty:
             fig_forn = go.Figure(go.Bar(
@@ -1290,14 +1326,15 @@ elif pagina_selecionada == "💰 Financeiro":
             fig_forn.update_layout(
                 xaxis=dict(tickformat=",.0f", tickprefix="R$ "),
                 yaxis=dict(autorange="reversed"),
-                margin=dict(t=20, b=10, r=180),
-                height=max(300, top_n * 30))
-            st.plotly_chart(fig_forn, use_container_width=True)
+                margin=dict(t=20, b=10, r=200),
+                height=max(300, int(forn_top_n) * 30))
+            st.plotly_chart(fig_forn, use_container_width=True, key="chart_forn")
 
     with l4b:
         st.subheader("Curva ABC — Fornecedores")
-        abc_forn = curva_abc(df_atual, "cli_fornecedor", "valor_global")
+        abc_forn = curva_abc(df_forn_base, "cli_fornecedor", "valor_global")
         if not abc_forn.empty:
+            # Esconde labels do eixo X (muitos fornecedores) mas mantém hover
             fig_abc_f = go.Figure()
             fig_abc_f.add_trace(go.Bar(
                 x=abc_forn["nome"], y=abc_forn["valor"],
@@ -1314,15 +1351,9 @@ elif pagina_selecionada == "💰 Financeiro":
                 yaxis2=dict(overlaying="y", side="right",
                             range=[0, 105], ticksuffix="%", showgrid=False),
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-                margin=dict(t=50, b=40), height=340,
+                margin=dict(t=50, b=20), height=360,
                 xaxis=dict(showticklabels=False))
-            st.plotly_chart(fig_abc_f, use_container_width=True)
-
-            tbl_f = abc_forn.copy()
-            tbl_f["Valor"] = tbl_f["valor"].apply(fmt_brl)
-            tbl_f["%"]     = tbl_f["pct"].apply(lambda x: f"{x:.1f}%")
-            tbl_f["Acum."] = tbl_f["cum_pct"].apply(lambda x: f"{x:.1f}%")
-            st.dataframe(
-                tbl_f[["classe","nome","Valor","%","Acum."]].rename(
-                    columns={"classe":"Classe","nome":"Fornecedor"}),
-                use_container_width=True, hide_index=True, height=230)
+            st.plotly_chart(fig_abc_f, use_container_width=True, key="chart_abc_forn")
+            tbl_abc(abc_forn, "Fornecedor")
+        else:
+            st.info("Sem dados para o filtro selecionado.")
