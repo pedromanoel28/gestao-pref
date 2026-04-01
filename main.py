@@ -853,8 +853,8 @@ elif pagina_selecionada == "👤 Reunião 1:1":
     pendentes_n = sum(1 for t in tarefas if t["status"] not in ("Concluído","N/A"))
     atrasadas_n = sum(1 for t in tarefas
                       if t["status"] not in ("Concluído","N/A")
-                      and t.get("entrega_prevista","") < hoje_iso
-                      and t.get("entrega_prevista"))
+                      and t.get("entrega_prevista")
+                      and t["entrega_prevista"] < hoje_iso)
     impedidas_n = sum(1 for t in tarefas if t["status"] == "Impedido")
 
     m1,m2,m3,m4,m5 = st.columns(5)
