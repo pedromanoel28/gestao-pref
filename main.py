@@ -568,7 +568,9 @@ elif pagina_selecionada == "👥 Equipe":
 
 @st.cache_data(ttl=60)
 def carregar_obras_ativas():
-    resp = supabase.table("obras").select("id, codigo, nome, status").order("nome").execute()
+    resp = supabase.table("obras")\
+        .select("id, codigo, nome, status, modalidade, cliente, responsavel_id")\
+        .order("nome").execute()
     return resp.data
 
 @st.cache_data(ttl=60)
@@ -686,6 +688,26 @@ def limpar_cache():
     carregar_ultimo_update.clear()
     carregar_tarefas_colab.clear()
 
+@st.cache_data(ttl=60)
+def volume_referencia(obra_id):
+    """Retorna o volume de referência da obra para uso financeiro.
+    Prioridade: volume_projeto > volume (comercial) > None."""
+    try:
+        resp = supabase.table("obras_financeiro")\
+            .select("volume_projeto, volume")\
+            .eq("obra_id", obra_id)\
+            .limit(1).execute()
+        if not resp.data:
+            return None
+        row = resp.data[0]
+        if row.get("volume_projeto") not in (None, ""):
+            return float(row["volume_projeto"])
+        if row.get("volume") not in (None, ""):
+            return float(row["volume"])
+        return None
+    except Exception:
+        return None
+
 # ==========================================================
 # PÁGINA: GESTÃO DE OBRAS (SÚMULA)
 # ==========================================================
@@ -743,6 +765,50 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
 
     if r3.button("🔄 Atualizar"):
         limpar_cache(); st.rerun()
+
+    # ── EDITAR DADOS DA OBRA ──────────────────────────────
+    obra_atual = next((o for o in obras if o["id"] == obra_id), {})
+
+    STATUS_OBRA  = ["Em Andamento", "Concluída", "Cancelada", "Proposta"]
+    MODALIDADES  = ["FOB", "CIF", "Montagem", "Não definida"]
+
+    with st.expander("⚙️ Editar dados da obra", expanded=False):
+        ea1, ea2, ea3, ea4 = st.columns(4)
+
+        cur_status = obra_atual.get("status") or "Em Andamento"
+        idx_status = STATUS_OBRA.index(cur_status) if cur_status in STATUS_OBRA else 0
+        ed_status = ea1.selectbox("Status da obra", STATUS_OBRA,
+                                   index=idx_status, key="ed_obra_status")
+
+        cur_modal = obra_atual.get("modalidade") or "Não definida"
+        idx_modal = MODALIDADES.index(cur_modal) if cur_modal in MODALIDADES else 3
+        ed_modal = ea2.selectbox("Modalidade", MODALIDADES,
+                                  index=idx_modal, key="ed_obra_modal")
+
+        ed_cliente = ea3.text_input("Cliente", value=obra_atual.get("cliente") or "",
+                                     key="ed_obra_cliente")
+
+        # Responsável — lista da equipe com opção vazia
+        resp_opcoes = ["—"] + equipe_nomes
+        cur_resp_id = obra_atual.get("responsavel_id")
+        cur_resp_nome = next((e["nome"] for e in equipe_lista
+                              if e["id"] == cur_resp_id), None)
+        idx_resp = resp_opcoes.index(cur_resp_nome) if cur_resp_nome in resp_opcoes else 0
+        ed_resp = ea4.selectbox("Responsável", resp_opcoes,
+                                 index=idx_resp, key="ed_obra_resp")
+
+        if st.button("💾 Salvar dados da obra", key="btn_salvar_obra"):
+            novo_resp_id = equipe_ids.get(ed_resp) if ed_resp != "—" else None
+            payload = {
+                "status":         ed_status,
+                "modalidade":     ed_modal,
+                "cliente":        ed_cliente.strip() or None,
+                "responsavel_id": int(novo_resp_id) if novo_resp_id else None,
+            }
+            supabase.table("obras").update(payload).eq("id", obra_id).execute()
+            limpar_cache()
+            st.success("✅ Dados da obra atualizados!")
+            st.rerun()
 
     # ── CARREGA E PREPARA DADOS ───────────────────────────
     tarefas = carregar_tarefas(obra_id)
