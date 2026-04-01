@@ -1383,19 +1383,30 @@ elif pagina_selecionada == "🏭 Produção":
 
         try:
             rows = _query("obra_id, produto, etapa, volume_total, peso_aco,"
-                          " peso_aco_frouxo, peso_aco_cord_viga, peso_aco_cord_laje,"
-                          " data_fabricacao")
+                          " peso_aco_frouxo, peso_aco_protendido, data_fabricacao")
         except Exception:
             rows = _query("obra_id, produto, etapa, volume_total, peso_aco, data_fabricacao")
 
         df = pd.DataFrame(rows)
         if df.empty: return df
-        for col in ["volume_total", "peso_aco", "peso_aco_frouxo",
-                    "peso_aco_cord_viga", "peso_aco_cord_laje"]:
+        for col in ["volume_total", "peso_aco", "peso_aco_frouxo", "peso_aco_protendido"]:
             if col not in df.columns:
                 df[col] = 0.0
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
         df["mes"] = pd.to_datetime(df["data_fabricacao"], errors="coerce").dt.to_period("M").astype(str)
+
+        # Classifica produto → tipo para split da cordoalha
+        def _tipo_produto(nome):
+            n = str(nome).upper()
+            if "LAJE" in n:  return "Laje"
+            if "VIGA" in n:  return "Viga"
+            return "Outros"
+
+        df["tipo_produto"] = df["produto"].apply(_tipo_produto)
+        # Cordoalha por tipo: distribui peso_aco_protendido conforme o tipo
+        df["cord_viga"]  = df["peso_aco_protendido"].where(df["tipo_produto"] == "Viga",  0)
+        df["cord_laje"]  = df["peso_aco_protendido"].where(df["tipo_produto"] == "Laje",  0)
+        df["cord_outros"] = df["peso_aco_protendido"].where(df["tipo_produto"] == "Outros", 0)
         return df
 
     @st.cache_data(ttl=600)
@@ -1500,29 +1511,57 @@ elif pagina_selecionada == "🏭 Produção":
     obras_lista = carregar_obras_ativas()
     obras_map   = {o["id"]: f"{o['codigo']} — {o['nome']}" for o in obras_lista}
 
-    periodo_opcoes = {
-        "Últimos 6 meses":  6,
-        "Últimos 12 meses": 12,
-        "Últimos 24 meses": 24,
-        "Todo o período":   None,
-    }
-    f1, f2, f3 = st.columns([2, 4, 1])
-    sel_periodo = f1.selectbox("Período", list(periodo_opcoes.keys()), index=1,
-                                key="prod_periodo")
-    sel_obras   = f2.multiselect("Obras", list(obras_map.values()), key="prod_obras",
-                                  placeholder="Todas as obras")
-    if f3.button("🔄 Atualizar", key="btn_prod_refresh"):
+    hoje = date.today()
+
+    f1, f2, f3, f4 = st.columns([2, 2, 4, 1])
+    tipo_periodo = f1.radio("Tipo de período", ["Predefinido", "Personalizado"],
+                             horizontal=True, key="prod_tipo_periodo")
+
+    if tipo_periodo == "Predefinido":
+        periodo_opcoes = {
+            "Hoje":             0,
+            "Últimos 7 dias":   0.25,
+            "Últimos 30 dias":  1,
+            "Últimos 3 meses":  3,
+            "Últimos 6 meses":  6,
+            "Últimos 12 meses": 12,
+            "Últimos 24 meses": 24,
+            "Todo o período":   None,
+        }
+        sel_periodo = f2.selectbox("Período", list(periodo_opcoes.keys()),
+                                    index=5, key="prod_periodo")
+        n_meses = periodo_opcoes[sel_periodo]
+        if n_meses is None:
+            inicio_str, fim_str = None, hoje.isoformat()
+        elif n_meses == 0:
+            inicio_str = hoje.isoformat()
+            fim_str    = hoje.isoformat()
+        else:
+            inicio_str = (hoje - timedelta(days=int(n_meses * 30.5))).strftime("%Y-%m-%d")
+            fim_str    = hoje.isoformat()
+        n_meses_ev = int(n_meses or 24)
+    else:
+        intervalo = f2.date_input(
+            "Intervalo", value=(hoje - timedelta(days=365), hoje),
+            key="prod_intervalo")
+        if isinstance(intervalo, (list, tuple)) and len(intervalo) == 2:
+            inicio_str = intervalo[0].isoformat()
+            fim_str    = intervalo[1].isoformat()
+            n_meses_ev = max(1, int((intervalo[1] - intervalo[0]).days / 30.5))
+        else:
+            inicio_str = hoje.isoformat()
+            fim_str    = hoje.isoformat()
+            n_meses_ev = 1
+
+    sel_obras = f3.multiselect("Obras", list(obras_map.values()), key="prod_obras",
+                                placeholder="Todas as obras")
+    if f4.button("🔄 Atualizar", key="btn_prod_refresh"):
         carregar_fabricacao.clear()
         carregar_transporte_prod.clear()
         carregar_montagem_prod.clear()
         carregar_patio.clear()
         carregar_custos_prod.clear()
         st.rerun()
-
-    hoje       = date.today()
-    n_meses    = periodo_opcoes[sel_periodo]
-    inicio_str = (hoje - timedelta(days=n_meses * 30)).strftime("%Y-%m-%d") if n_meses else None
-    fim_str    = hoje.isoformat()
 
     with st.spinner("Carregando dados de produção..."):
         df_fab = carregar_fabricacao(inicio_str, fim_str)
@@ -1616,7 +1655,7 @@ elif pagina_selecionada == "🏭 Produção":
         # ── Bloco B — Evolução mensal (áreas sobrepostas) ──
         st.markdown("#### 📈 Evolução mensal (m³)")
         ev1, ev2 = st.columns([5, 1])
-        ev_n = ev2.number_input("Meses", 3, 84, min(n_meses or 24, 24),
+        ev_n = ev2.number_input("Meses", 1, 84, min(n_meses_ev, 84),
                                  key="ev_prod_n", step=1)
 
         def agg_mes(df, col_vol, label):
@@ -1979,13 +2018,13 @@ elif pagina_selecionada == "🏭 Produção":
         # Totais por tipo de aço
         if not df_fab_f.empty:
             aco_frouxo    = df_fab_f["peso_aco_frouxo"].sum()
-            aco_cord_viga = df_fab_f["peso_aco_cord_viga"].sum()
-            aco_cord_laje = df_fab_f["peso_aco_cord_laje"].sum()
+            cord_viga     = df_fab_f["cord_viga"].sum()
+            cord_laje     = df_fab_f["cord_laje"].sum()
+            cord_outros   = df_fab_f["cord_outros"].sum()
             aco_total     = df_fab_f["peso_aco"].sum()
-            # Se colunas separadas não existem (zeros), usa o total
-            tem_breakdown = (aco_frouxo + aco_cord_viga + aco_cord_laje) > 0
+            tem_breakdown = (aco_frouxo + cord_viga + cord_laje + cord_outros) > 0
         else:
-            aco_frouxo = aco_cord_viga = aco_cord_laje = aco_total = 0
+            aco_frouxo = cord_viga = cord_laje = cord_outros = aco_total = 0
             tem_breakdown = False
 
         kgm3 = aco_total / vol_total_fab if vol_total_fab > 0 else 0
@@ -1998,23 +2037,25 @@ elif pagina_selecionada == "🏭 Produção":
 
         prazo_medio = df_patio["dias_patio"].mean() if not df_patio.empty else None
 
-        # ── Bloco A — 4 métricas de aço ────────────────────
+        # ── Bloco A — métricas de aço ───────────────────────
         st.markdown("#### ⚙️ Consumo de aço")
         if tem_breakdown:
-            pct_frouxo    = aco_frouxo    / aco_total * 100 if aco_total else 0
-            pct_cord_viga = aco_cord_viga / aco_total * 100 if aco_total else 0
-            pct_cord_laje = aco_cord_laje / aco_total * 100 if aco_total else 0
-            i1, i2, i3, i4 = st.columns(4)
-            i1.metric("⚙️ Frouxo total",
+            pct_frouxo = aco_frouxo / aco_total * 100 if aco_total else 0
+            pct_cv     = cord_viga  / aco_total * 100 if aco_total else 0
+            pct_cl     = cord_laje  / aco_total * 100 if aco_total else 0
+            i1, i2, i3, i4, i5 = st.columns(5)
+            i1.metric("⚙️ Aço total",
+                      f"{aco_total:,.0f} kg".replace(",", "."))
+            i2.metric("🔩 Frouxo",
                       f"{aco_frouxo:,.0f} kg".replace(",", "."),
                       delta=f"{pct_frouxo:.0f}% do total", delta_color="off")
-            i2.metric("🔗 Cord. Viga",
-                      f"{aco_cord_viga:,.0f} kg".replace(",", "."),
-                      delta=f"{pct_cord_viga:.0f}% do total", delta_color="off")
-            i3.metric("🔗 Cord. Laje",
-                      f"{aco_cord_laje:,.0f} kg".replace(",", "."),
-                      delta=f"{pct_cord_laje:.0f}% do total", delta_color="off")
-            i4.metric("📐 kg aço / m³", f"{kgm3:.2f} kg/m³")
+            i3.metric("🔗 Cord. Viga",
+                      f"{cord_viga:,.0f} kg".replace(",", "."),
+                      delta=f"{pct_cv:.0f}% do total", delta_color="off")
+            i4.metric("🔗 Cord. Laje",
+                      f"{cord_laje:,.0f} kg".replace(",", "."),
+                      delta=f"{pct_cl:.0f}% do total", delta_color="off")
+            i5.metric("📐 kg aço / m³", f"{kgm3:.2f} kg/m³")
         else:
             i1, i2, i3 = st.columns(3)
             i1.metric("⚙️ Aço total consumido",
@@ -2030,16 +2071,21 @@ elif pagina_selecionada == "🏭 Produção":
         if not df_fab_f.empty and "mes" in df_fab_f.columns:
             if tem_breakdown:
                 aco_mes = (df_fab_f.groupby("mes")
-                           .agg(frouxo=("peso_aco_frouxo", "sum"),
-                                cord_viga=("peso_aco_cord_viga", "sum"),
-                                cord_laje=("peso_aco_cord_laje", "sum"))
+                           .agg(frouxo=("peso_aco_frouxo",  "sum"),
+                                cv=("cord_viga",            "sum"),
+                                cl=("cord_laje",            "sum"),
+                                co=("cord_outros",          "sum"))
                            .reset_index().sort_values("mes"))
                 fig_aco_ev = go.Figure()
-                for col, nome, cor in [
-                    ("frouxo",    "Frouxo",         "#1976D2"),
-                    ("cord_viga", "Cord. Viga",     "#FB8C00"),
-                    ("cord_laje", "Cord. Laje",     "#43A047"),
-                ]:
+                series_aco = [
+                    ("frouxo", "Frouxo",         "#1976D2"),
+                    ("cv",     "Cord. Viga",     "#FB8C00"),
+                    ("cl",     "Cord. Laje",     "#43A047"),
+                    ("co",     "Cord. Outros",   "#9C27B0"),
+                ]
+                for col, nome, cor in series_aco:
+                    if aco_mes[col].sum() == 0:
+                        continue
                     fig_aco_ev.add_trace(go.Scatter(
                         x=aco_mes["mes"], y=aco_mes[col],
                         mode="lines+markers", name=nome,
@@ -2082,15 +2128,23 @@ elif pagina_selecionada == "🏭 Produção":
                     return rows
                 try:
                     rows = _q("obra_id, produto, volume_total, peso_aco,"
-                              " peso_aco_frouxo, peso_aco_cord_viga, peso_aco_cord_laje")
+                              " peso_aco_frouxo, peso_aco_protendido")
                 except Exception:
                     rows = _q("obra_id, produto, volume_total, peso_aco")
                 df = pd.DataFrame(rows)
                 if df.empty: return df
-                for col in ["volume_total", "peso_aco", "peso_aco_frouxo",
-                            "peso_aco_cord_viga", "peso_aco_cord_laje"]:
+                for col in ["volume_total", "peso_aco", "peso_aco_frouxo", "peso_aco_protendido"]:
                     if col not in df.columns: df[col] = 0.0
                     df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+                def _tipo(n):
+                    n = str(n).upper()
+                    if "LAJE" in n: return "Laje"
+                    if "VIGA" in n: return "Viga"
+                    return "Outros"
+                df["tipo_produto"] = df["produto"].apply(_tipo)
+                df["cord_viga"]   = df["peso_aco_protendido"].where(df["tipo_produto"] == "Viga",  0)
+                df["cord_laje"]   = df["peso_aco_protendido"].where(df["tipo_produto"] == "Laje",  0)
+                df["cord_outros"] = df["peso_aco_protendido"].where(df["tipo_produto"] == "Outros", 0)
                 return df
 
             df_hist = carregar_fabricacao_historico()
@@ -2108,37 +2162,37 @@ elif pagina_selecionada == "🏭 Produção":
             bench = (df_fab_f[df_fab_f["volume_total"] > 0]
                      .groupby("produto")
                      .agg(frouxo=("peso_aco_frouxo", "sum"),
-                          cord_viga=("peso_aco_cord_viga", "sum"),
-                          cord_laje=("peso_aco_cord_laje", "sum"),
-                          aco=("peso_aco", "sum"),
-                          vol=("volume_total", "sum"))
+                          cv=("cord_viga",           "sum"),
+                          cl=("cord_laje",           "sum"),
+                          aco=("peso_aco",           "sum"),
+                          vol=("volume_total",       "sum"))
                      .reset_index())
-            bench["frouxo_m3"]   = bench["frouxo"]   / bench["vol"]
-            bench["cord_v_m3"]   = bench["cord_viga"] / bench["vol"]
-            bench["cord_l_m3"]   = bench["cord_laje"] / bench["vol"]
-            bench["total_kgm3"]  = bench["aco"] / bench["vol"]
+            bench["frouxo_m3"] = bench["frouxo"] / bench["vol"]
+            bench["cv_m3"]     = bench["cv"]     / bench["vol"]
+            bench["cl_m3"]     = bench["cl"]     / bench["vol"]
+            bench["total_m3"]  = bench["aco"]    / bench["vol"]
             bench = bench.merge(ref_prod[["produto", "ref_kgm3"]], on="produto", how="left")
             bench["vs_ref"] = bench.apply(
-                lambda r: f"{(r['total_kgm3'] - r['ref_kgm3']) / r['ref_kgm3'] * 100:+.0f}%"
+                lambda r: f"{(r['total_m3'] - r['ref_kgm3']) / r['ref_kgm3'] * 100:+.0f}%"
                 if pd.notna(r["ref_kgm3"]) and r["ref_kgm3"] > 0 else "—", axis=1)
 
             def _farol_bench(row):
                 if pd.isna(row["ref_kgm3"]) or row["ref_kgm3"] == 0: return "—"
-                pct = (row["total_kgm3"] - row["ref_kgm3"]) / row["ref_kgm3"] * 100
+                pct = (row["total_m3"] - row["ref_kgm3"]) / row["ref_kgm3"] * 100
                 if pct > 20: return "🔴 Alto"
                 if pct > 5:  return "🟡 Médio"
                 return "🟢 Normal"
 
-            bench["Referência"] = bench.apply(_farol_bench, axis=1)
-            bench = bench.sort_values("total_kgm3", ascending=False)
+            bench["Status"] = bench.apply(_farol_bench, axis=1)
+            bench = bench.sort_values("total_m3", ascending=False)
 
             if tem_breakdown:
-                df_bench_show = bench[["produto", "frouxo_m3", "cord_v_m3",
-                                       "cord_l_m3", "total_kgm3", "vs_ref", "Referência"]].copy()
+                df_bench_show = bench[["produto", "frouxo_m3", "cv_m3", "cl_m3",
+                                       "total_m3", "vs_ref", "Status"]].copy()
                 df_bench_show.columns = ["Produto", "Frouxo kg/m³", "Cord.Viga kg/m³",
                                           "Cord.Laje kg/m³", "Total kg/m³", "vs Hist.", "Status"]
             else:
-                df_bench_show = bench[["produto", "total_kgm3", "vs_ref", "Referência"]].copy()
+                df_bench_show = bench[["produto", "total_m3", "vs_ref", "Status"]].copy()
                 df_bench_show.columns = ["Produto", "kg/m³", "vs Hist.", "Status"]
 
             st.dataframe(
@@ -2154,15 +2208,19 @@ elif pagina_selecionada == "🏭 Produção":
         with col_pizza:
             st.markdown("#### 🥧 Composição do aço")
             if not df_fab_f.empty and tem_breakdown and aco_total > 0:
-                labels_p = ["Frouxo", "Cord. Viga", "Cord. Laje"]
-                values_p = [aco_frouxo, aco_cord_viga, aco_cord_laje]
-                values_p = [v for v in values_p if v > 0]
-                labels_p = [l for l, v in zip(labels_p,
-                             [aco_frouxo, aco_cord_viga, aco_cord_laje]) if v > 0]
+                _raw = [
+                    ("Frouxo",       aco_frouxo,  "#1976D2"),
+                    ("Cord. Viga",   cord_viga,   "#FB8C00"),
+                    ("Cord. Laje",   cord_laje,   "#43A047"),
+                    ("Cord. Outros", cord_outros, "#9C27B0"),
+                ]
+                _labels = [l for l, v, _ in _raw if v > 0]
+                _values = [v for _, v, _ in _raw if v > 0]
+                _colors = [c for _, v, c in _raw if v > 0]
                 fig_pizza = go.Figure(go.Pie(
-                    labels=labels_p, values=values_p,
+                    labels=_labels, values=_values,
                     hole=0.45,
-                    marker_colors=["#1976D2", "#FB8C00", "#43A047"],
+                    marker_colors=_colors,
                     textinfo="label+percent",
                     hovertemplate="%{label}<br>%{value:,.0f} kg<br>%{percent}<extra></extra>"))
                 fig_pizza.update_layout(
@@ -2170,8 +2228,7 @@ elif pagina_selecionada == "🏭 Produção":
                     margin=dict(t=20, b=20, l=20, r=20), height=340)
                 st.plotly_chart(fig_pizza, use_container_width=True, key="chart_pizza_aco")
             elif not df_fab_f.empty and aco_total > 0:
-                st.info("Breakdown por tipo de aço não disponível. "
-                        "Adicione colunas peso_aco_frouxo / peso_aco_cord_viga / peso_aco_cord_laje.")
+                st.info("Colunas peso_aco_frouxo / peso_aco_protendido sem dados no período.")
             else:
                 st.info("Sem dados de aço.")
 
