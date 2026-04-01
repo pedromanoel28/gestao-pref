@@ -312,6 +312,20 @@ if pagina_selecionada == "📥 Importador de Arquivos":
 
                         # ── ROTAS 7, 8, 9: PRODUÇÃO ──────────────────────────
                         elif rota in ["7","8","9"]:
+
+                            # ── ROTA 7: renomear colunas por posição ──────────
+                            # Aceita o CSV original (Avanço_Físico_Fabricação.csv)
+                            # sem depender dos nomes acentuados do cabeçalho.
+                            if rota == "7":
+                                _nomes7 = [
+                                    "peca","codigo","obra_codigo","etapa","produto",
+                                    "secao","qtde_pecas","volume_total","data_fabricacao",
+                                    "volume_teorico","peso_aco","peso_aco_frouxo",
+                                    "peso_aco_protendido","comprimento",
+                                ]
+                                _n = min(len(_nomes7), len(df.columns))
+                                df.columns = _nomes7[:_n] + list(df.columns[_n:])
+
                             mob = mapa_obras()
                             df["obra_id"] = aplicar_obra_id(df["obra_codigo"].apply(extrair_codigo), mob)
                             ignorados = df["obra_id"].isna().sum()
