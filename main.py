@@ -26,11 +26,10 @@ st.sidebar.divider()
 
 pagina_selecionada = st.sidebar.radio("Menu Principal", [
     "--- 📊 DASHBOARDS ---", "🏭 Produção", "💰 Financeiro", "👷 Folha / RH",
-    "--- 🛠️ GESTÃO ---", "🏗️ Gestão de Obras", "👥 Equipe",
+    "--- 🛠️ GESTÃO ---", "🏗️ Gestão de Obras", "🛤️ Jornada da Obra", "👥 Equipe", 
     "📋 Gestão à Vista", "👤 Reunião 1:1",
     "--- 🗄️ BASE DE DADOS ---", "📥 Importador de Arquivos"
 ])
-
 if "---" in pagina_selecionada:
     st.sidebar.warning("👆 Selecione uma página válida.")
     st.stop()
@@ -3405,3 +3404,320 @@ elif pagina_selecionada == "🏭 Produção":
                 st.plotly_chart(fig_hist, use_container_width=True, key="chart_hist_patio")
             else:
                 st.info("Sem dados de pátio.")
+        # ==========================================================
+# PÁGINA: JORNADA DA OBRA (VISÃO MACRO E GANTT)
+# ==========================================================
+elif pagina_selecionada == "🛤️ Jornada da Obra":
+    import pandas as pd
+    from datetime import date
+    import plotly.express as px
+    import plotly.graph_objects as go
+
+    st.header("🛤️ Jornada do Contrato e Marcos")
+
+    # ── FUNÇÕES DE CARGA ESPECÍFICAS DA JORNADA ──────────────
+    @st.cache_data(ttl=60)
+    def carregar_jornada(obra_id):
+        resp = supabase.table("obra_jornada")\
+            .select("*, template:jornada_template(*), responsavel:equipe(nome)")\
+            .eq("obra_id", obra_id).execute()
+        return sorted(resp.data, key=lambda x: x["template"]["ordem"]) if resp.data else []
+
+    @st.cache_data(ttl=60)
+    def carregar_marcos(obra_id):
+        resp = supabase.table("obra_marcos").select("*").eq("obra_id", obra_id).execute()
+        return resp.data[0] if resp.data else {}
+
+    def instanciar_jornada(obra_id, modalidade):
+        """Cria as tarefas da jornada para a obra, filtrando pela modalidade."""
+        templates = supabase.table("jornada_template").select("*").execute().data
+        if not templates: return False
+        
+        pacote = []
+        for t in templates:
+            # Filtro inteligente de aplicabilidade
+            aplica = True
+            if modalidade == "FOB" and not t["aplica_fob"]: aplica = False
+            if modalidade == "CIF" and not t["aplica_cif"]: aplica = False
+            if modalidade == "Montagem" and not t["aplica_montagem"]: aplica = False
+            
+            pacote.append({
+                "obra_id": obra_id,
+                "template_id": t["id"],
+                "aplicavel": aplica,
+                "status": "nao_iniciado"
+            })
+        try:
+            supabase.table("obra_jornada").insert(pacote).execute()
+            
+            # Instancia a linha de marcos vazia apenas se não existir
+            marcos_existentes = supabase.table("obra_marcos").select("id").eq("obra_id", obra_id).execute().data
+            if not marcos_existentes:
+                supabase.table("obra_marcos").insert({"obra_id": obra_id}).execute()
+            return True
+        except Exception as e:
+            st.error(f"Erro ao instanciar: {e}")
+            return False
+
+    # ── MAPEAMENTO DE STATUS ─────────────────────────────────
+    MAP_ST = {
+        "nao_iniciado": ("⬜", "Não iniciado"),
+        "em_andamento": ("🔵", "Em andamento"),
+        "concluido":    ("✅", "Concluído"),
+        "impedido":     ("🔴", "Impedido")
+    }
+
+    def derivar_status_etapa(itens):
+        status_list = [i["status"] for i in itens if i["aplicavel"]]
+        if not status_list: return "⬜", "Não aplicável"
+        
+        if "impedido" in status_list: return "🔴", "Impedida"
+        if all(s == "concluido" for s in status_list): return "✅", "Concluída"
+        if all(s == "nao_iniciado" for s in status_list): return "⬜", "Não iniciada"
+        return "🔵", "Em andamento"
+
+    # ── SELEÇÃO DE OBRA ──────────────────────────────────────
+    obras = carregar_obras_ativas()
+    if not obras:
+        st.warning("Nenhuma obra cadastrada."); st.stop()
+
+    c1, c2, c3 = st.columns([3, 1, 1])
+    obras_map = {f"{o['codigo']} — {o['nome']}": o for o in obras}
+    obra_sel_str = c1.selectbox("Selecione a Obra", list(obras_map.keys()), label_visibility="collapsed")
+    obra_sel = obras_map[obra_sel_str]
+    obra_id = obra_sel["id"]
+    modalidade = obra_sel.get("modalidade") or "Montagem"
+
+    if c3.button("🔄 Atualizar Dados", use_container_width=True):
+        carregar_jornada.clear()
+        carregar_marcos.clear()
+        st.rerun()
+
+    jornada = carregar_jornada(obra_id)
+    
+    # ── INSTANCIAÇÃO SE VAZIO ────────────────────────────────
+    if not jornada:
+        st.info(f"A jornada do contrato para a obra **{obra_sel['nome']}** ainda não foi iniciada.")
+        st.write(f"Modalidade detectada: **{modalidade}**")
+        if st.button("🚀 Iniciar Jornada do Contrato", type="primary"):
+            with st.spinner("Gerando entregáveis e cronograma..."):
+                if instanciar_jornada(obra_id, modalidade):
+                    carregar_jornada.clear()
+                    carregar_marcos.clear()
+                    st.rerun()
+                else:
+                    st.error("Erro ao gerar jornada. Verifique se a tabela 'jornada_template' está preenchida no banco.")
+        st.stop()
+
+    # ── PROCESSAMENTO DA JORNADA ─────────────────────────────
+    etapas = {}
+    total_aplicaveis = 0
+    total_concluidas = 0
+
+    for item in jornada:
+        if not item["aplicavel"]: continue
+        total_aplicaveis += 1
+        if item["status"] == "concluido": total_concluidas += 1
+        
+        nome_etapa = item["template"]["etapa_nome"]
+        etapas.setdefault(nome_etapa, []).append(item)
+
+    pct_jornada = (total_concluidas / total_aplicaveis) * 100 if total_aplicaveis else 0
+
+    # ── BARRA DE PROGRESSO VISUAL (O MAPA DO FLUXO) ──────────
+    html_etapas = []
+    for nome_etapa, itens in etapas.items():
+        icone, texto_status = derivar_status_etapa(itens)
+        cor_borda = "#43A047" if icone == "✅" else "#E53935" if icone == "🔴" else "#1976D2" if icone == "🔵" else "#546E7A"
+        opacidade = "1" if icone != "⬜" else "0.5"
+        
+        html_etapas.append(f"""
+        <div style="display:inline-block; text-align:center; margin-right:20px; opacity:{opacidade};">
+            <div style="border-bottom: 3px solid {cor_borda}; padding-bottom:5px; margin-bottom:5px;">
+                <span style="font-size:1.2rem;">{icone}</span> <b>{nome_etapa}</b>
+            </div>
+            <div style="font-size:0.75rem; color:#888;">{texto_status}</div>
+        </div>
+        """)
+
+    st.markdown(f"#### 🛤️ Mapa do Contrato — {pct_jornada:.1f}% concluído")
+    st.progress(pct_jornada / 100)
+    st.markdown("<div style='overflow-x:auto; white-space:nowrap; padding:10px 0;'>" + " ➔ ".join(html_etapas) + "</div>", unsafe_allow_html=True)
+    
+    st.divider()
+
+    # ── ABAS: ENTREGÁVEIS vs CRONOGRAMA ──────────────────────
+    aba_jornada, aba_marcos = st.tabs(["📋 Gestão dos Entregáveis", "📅 Cronograma Gantt (Pactuado vs Real)"])
+
+    # ════════════════════════════════════════════════════════
+    # ABA 1: GESTÃO DA JORNADA (ENTREGÁVEIS)
+    # ════════════════════════════════════════════════════════
+    with aba_jornada:
+        st.caption("Expanda a etapa para atualizar o status de cada entregável.")
+        equipe = carregar_equipe_ativa()
+        opcoes_equipe = ["—"] + [e["nome"] for e in equipe]
+        mapa_eq_ids = {e["nome"]: e["id"] for e in equipe}
+
+        for nome_etapa, itens in etapas.items():
+            icone_etapa, status_etapa = derivar_status_etapa(itens)
+            concluidos_etapa = sum(1 for i in itens if i["status"] == "concluido")
+            total_etapa = len(itens)
+            
+            with st.expander(f"{icone_etapa} {nome_etapa} ({concluidos_etapa}/{total_etapa})"):
+                for item in itens:
+                    t = item["template"]
+                    icone_item = MAP_ST[item["status"]][0]
+                    
+                    st.markdown(f"**{icone_item} {t['item_cod']} - {t['descricao']}**")
+                    
+                    c1, c2, c3, c4 = st.columns([2, 2, 3, 1])
+                    
+                    novo_st = c1.selectbox("Status", list(MAP_ST.keys()), 
+                                           format_func=lambda x: f"{MAP_ST[x][0]} {MAP_ST[x][1]}",
+                                           index=list(MAP_ST.keys()).index(item["status"]), 
+                                           key=f"st_{item['id']}")
+                    
+                    resp_atual = item["responsavel"]["nome"] if item.get("responsavel") else "—"
+                    novo_resp = c2.selectbox("Responsável", opcoes_equipe, 
+                                             index=opcoes_equipe.index(resp_atual) if resp_atual in opcoes_equipe else 0,
+                                             key=f"resp_{item['id']}")
+                    
+                    novo_imp = c3.text_input("Impedimento / Obs", value=item["impedimento"] or item["observacao"] or "", key=f"obs_{item['id']}")
+                    
+                    if c4.button("💾 Salvar", key=f"btn_{item['id']}", use_container_width=True):
+                        dados_update = {
+                            "status": novo_st,
+                            "responsavel_id": mapa_eq_ids.get(novo_resp) if novo_resp != "—" else None,
+                            "updated_at": "now()"
+                        }
+                        if novo_st == "impedido":
+                            dados_update["impedimento"] = novo_imp
+                            dados_update["observacao"] = None
+                        else:
+                            dados_update["observacao"] = novo_imp
+                            dados_update["impedimento"] = None
+                            
+                        if novo_st == "concluido" and item["status"] != "concluido":
+                            dados_update["data_conclusao"] = date.today().isoformat()
+                            
+                        supabase.table("obra_jornada").update(dados_update).eq("id", item["id"]).execute()
+                        carregar_jornada.clear()
+                        st.success("Salvo!"); st.rerun()
+                    st.write("---")
+
+    # ════════════════════════════════════════════════════════
+    # ABA 2: MARCOS E GANTT
+    # ════════════════════════════════════════════════════════
+    with aba_marcos:
+        marcos = carregar_marcos(obra_id)
+        
+        def safe_date(date_str):
+            if not date_str: return None
+            try: return date.fromisoformat(str(date_str)[:10])
+            except: return None
+
+        st.markdown("#### 📅 Cadastro de Datas")
+        with st.form("form_marcos"):
+            mc1, mc2, mc3 = st.columns(3)
+            
+            mc1.markdown("**🏭 Fabricação**")
+            f_ini_p = mc1.date_input("Início Pactuado (Fab)", value=safe_date(marcos.get("inicio_fab_pact")), format="DD/MM/YYYY")
+            f_fim_p = mc1.date_input("Fim Pactuado (Fab)", value=safe_date(marcos.get("fim_fab_pact")), format="DD/MM/YYYY")
+            f_ini_r = mc1.date_input("Início Real (Fab)", value=safe_date(marcos.get("inicio_fab_real")), format="DD/MM/YYYY")
+            f_fim_r = mc1.date_input("Fim Real (Fab)", value=safe_date(marcos.get("fim_fab_real")), format="DD/MM/YYYY")
+
+            mc2.markdown("**🚛 Expedição**")
+            e_ini_p = mc2.date_input("Início Pactuado (Exp)", value=safe_date(marcos.get("inicio_exp_pact")), format="DD/MM/YYYY")
+            e_fim_p = mc2.date_input("Fim Pactuado (Exp)", value=safe_date(marcos.get("fim_exp_pact")), format="DD/MM/YYYY")
+            e_ini_r = mc2.date_input("Início Real (Exp)", value=safe_date(marcos.get("inicio_exp_real")), format="DD/MM/YYYY")
+            e_fim_r = mc2.date_input("Fim Real (Exp)", value=safe_date(marcos.get("fim_exp_real")), format="DD/MM/YYYY")
+
+            mc3.markdown("**🏗️ Montagem / Entrega**")
+            m_ini_p = mc3.date_input("Início Pactuado (Mont)", value=safe_date(marcos.get("inicio_mont_pact")), format="DD/MM/YYYY")
+            m_fim_p = mc3.date_input("Entrega Final Pactuada", value=safe_date(marcos.get("entrega_pact")), format="DD/MM/YYYY")
+            m_ini_r = mc3.date_input("Início Real (Mont)", value=safe_date(marcos.get("inicio_mont_real")), format="DD/MM/YYYY")
+            m_fim_r = mc3.date_input("Entrega Final Real", value=safe_date(marcos.get("entrega_real")), format="DD/MM/YYYY")
+
+            if st.form_submit_button("💾 Salvar Marcos", type="primary"):
+                pacote_marcos = {
+                    "inicio_fab_pact": f_ini_p.isoformat() if f_ini_p else None,
+                    "fim_fab_pact": f_fim_p.isoformat() if f_fim_p else None,
+                    "inicio_fab_real": f_ini_r.isoformat() if f_ini_r else None,
+                    "fim_fab_real": f_fim_r.isoformat() if f_fim_r else None,
+                    "inicio_exp_pact": e_ini_p.isoformat() if e_ini_p else None,
+                    "fim_exp_pact": e_fim_p.isoformat() if e_fim_p else None,
+                    "inicio_exp_real": e_ini_r.isoformat() if e_ini_r else None,
+                    "fim_exp_real": e_fim_r.isoformat() if e_fim_r else None,
+                    "inicio_mont_pact": m_ini_p.isoformat() if m_ini_p else None,
+                    "entrega_pact": m_fim_p.isoformat() if m_fim_p else None,
+                    "inicio_mont_real": m_ini_r.isoformat() if m_ini_r else None,
+                    "entrega_real": m_fim_r.isoformat() if m_fim_r else None,
+                    "updated_at": "now()"
+                }
+                # Se não existir a linha, insere, senão atualiza
+                if not marcos:
+                    pacote_marcos["obra_id"] = obra_id
+                    supabase.table("obra_marcos").insert(pacote_marcos).execute()
+                else:
+                    supabase.table("obra_marcos").update(pacote_marcos).eq("obra_id", obra_id).execute()
+                
+                carregar_marcos.clear()
+                st.success("Marcos atualizados!"); st.rerun()
+
+        # ── GRÁFICO DE GANTT ──────────────────────────────────────
+        st.divider()
+        st.markdown("#### 📊 Cronograma Comparativo (Meta vs Real)")
+        
+        gantt_data = []
+        hoje = date.today()
+
+        def add_gantt(etapa, inicio_p, fim_p, inicio_r, fim_r):
+            # Faixa Pactuada
+            if inicio_p and fim_p:
+                gantt_data.append(dict(Etapa=etapa, Tipo="Meta Pactuada", Inicio=inicio_p, Fim=fim_p, Cor="#B0BEC5"))
+            
+            # Faixa Real
+            if inicio_r:
+                f_real_calc = fim_r if fim_r else hoje
+                cor_real = "#43A047" # Verde (No prazo)
+                
+                if fim_p:
+                    if fim_r and fim_r > fim_p: cor_real = "#E53935" # Vermelho
+                    elif not fim_r and hoje > fim_p: cor_real = "#E53935" # Vermelho
+                
+                texto_tipo = "Execução Real" if fim_r else "Execução em Andamento"
+                gantt_data.append(dict(Etapa=etapa, Tipo=texto_tipo, Inicio=inicio_r, Fim=f_real_calc, Cor=cor_real))
+
+        add_gantt("1. Fabricação", safe_date(marcos.get("inicio_fab_pact")), safe_date(marcos.get("fim_fab_pact")), 
+                                   safe_date(marcos.get("inicio_fab_real")), safe_date(marcos.get("fim_fab_real")))
+        
+        add_gantt("2. Expedição",  safe_date(marcos.get("inicio_exp_pact")), safe_date(marcos.get("fim_exp_pact")), 
+                                   safe_date(marcos.get("inicio_exp_real")), safe_date(marcos.get("fim_exp_real")))
+        
+        add_gantt("3. Montagem",   safe_date(marcos.get("inicio_mont_pact")), safe_date(marcos.get("entrega_pact")), 
+                                   safe_date(marcos.get("inicio_mont_real")), safe_date(marcos.get("entrega_real")))
+
+        if not gantt_data:
+            st.info("Preencha as datas de Início e Fim acima para visualizar o cronograma.")
+        else:
+            df_gantt = pd.DataFrame(gantt_data)
+            
+            fig_gantt = px.timeline(df_gantt, x_start="Inicio", x_end="Fim", y="Etapa", color="Tipo",
+                                    color_discrete_map={"Meta Pactuada": "#B0BEC5", "Execução Real": "#43A047", "Execução em Andamento": "#E53935"},
+                                    barmode="group", height=300)
+            
+            fig_gantt.update_yaxes(autorange="reversed")
+            fig_gantt.update_layout(
+                xaxis=dict(title="", tickformat="%d/%b/%y"),
+                yaxis=dict(title=""),
+                legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0, title=""),
+                margin=dict(t=10, b=10, l=10, r=10)
+            )
+            
+            for i, data in enumerate(fig_gantt.data):
+                tipo_atual = data.name
+                cores_linha = df_gantt[df_gantt["Tipo"] == tipo_atual]["Cor"].tolist()
+                fig_gantt.data[i].marker.color = cores_linha
+            
+            st.plotly_chart(fig_gantt, use_container_width=True)
+            st.caption("Cinza: Planejado | Verde: Executado dentro do prazo | Vermelho: Atrasado")
