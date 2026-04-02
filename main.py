@@ -119,10 +119,11 @@ def nulos(df):
 
 def mapa_obras():
     """Dicionário código-4-dígitos → id do banco."""
-    dados = supabase.table("obras").select("id, codigo").execute().data
+    dados = supabase.table("obras").select("id, cod4").execute().data
     m = {}
     for o in dados:
-        c = str(o["codigo"]).strip()[:4] if o["codigo"] else None
+        # Puxa a nova coluna cod4
+        c = str(o["cod4"]).strip()[:4] if o.get("cod4") else None
         if c and c.isdigit(): m[c] = o["id"]
     return m
 
@@ -677,7 +678,7 @@ elif pagina_selecionada == "👥 Equipe":
 @st.cache_data(ttl=60)
 def carregar_obras_ativas():
     resp = supabase.table("obras")\
-        .select("id, codigo, nome, status, modalidade, cliente, responsavel_id")\
+        .select("id, cod4, nome, status, modalidade, cliente, responsavel_id")\
         .order("nome").execute()
     return resp.data
 
@@ -781,7 +782,7 @@ def carregar_tarefas_colab(colab_id):
                 "avanco_percent, inicio_previsto, entrega_prevista, entrega_real, "
                 "gut_gravidade, gut_urgencia, gut_tendencia, gut_score, obra_id, origem, "
                 "responsavel_id, aprovador_id, consultado_id, informado_id, "
-                "obras(nome, codigo)")\
+                "obras(nome, cod4)")\
         .or_(f"responsavel_id.eq.{colab_id},aprovador_id.eq.{colab_id},"
              f"consultado_id.eq.{colab_id},informado_id.eq.{colab_id}")\
         .execute()
@@ -822,7 +823,7 @@ with st.sidebar.expander("✏️ Editar obra", expanded=False):
     if not _obras_sb:
         st.caption("Nenhuma obra cadastrada.")
     else:
-        _opc_sb   = {f"{o['codigo']} — {o['nome']}": o for o in _obras_sb}
+        _opc_sb   = {f"{o['cod4']} — {o['nome']}": o for o in _obras_sb}
         _sb_lbl   = st.selectbox("Obra", list(_opc_sb.keys()),
                                  key="sb_obra_sel", label_visibility="collapsed")
         _osb      = _opc_sb[_sb_lbl]
@@ -889,7 +890,7 @@ def volume_referencia(obra_id):
 def carregar_obras_completo():
     """obras LEFT JOIN obras_financeiro — base de todos os dashboards."""
     resp_o = supabase.table("obras")\
-        .select("id, codigo, nome, status, modalidade, cliente")\
+        .select("id, cod4, nome, status, modalidade, cliente")\
         .order("nome").execute()
     df_o = pd.DataFrame(resp_o.data or [])
     if df_o.empty:
@@ -1136,7 +1137,7 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
 
     def label_obra(o):
         upd_str = ultimo_upd.get(o["id"])
-        return f"{o['codigo']} — {o['nome']}" + (f" · 🕐{upd_str}" if upd_str else "")
+        return f"{o['cod4']} — {o['nome']}" + (f" · 🕐{upd_str}" if upd_str else "")
 
     opcoes_obras = {label_obra(o): o["id"] for o in obras_filtradas}
     obra_label   = r2.selectbox("Obra", list(opcoes_obras.keys()),
@@ -2609,7 +2610,7 @@ elif pagina_selecionada == "🏭 Produção":
     st.header("🏭 Dashboard de Produção")
 
     obras_lista = carregar_obras_ativas()
-    obras_map   = {o["id"]: f"{o['codigo']} — {o['nome']}" for o in obras_lista}
+    obras_map   = {o["id"]: f"{o['cod4']} — {o['nome']}" for o in obras_lista}
 
     hoje = date.today()
 
@@ -3482,7 +3483,7 @@ elif pagina_selecionada == "🛤️ Jornada da Obra":
         st.warning("Nenhuma obra cadastrada."); st.stop()
 
     c1, c2, c3 = st.columns([3, 1, 1])
-    obras_map = {f"{o['codigo']} — {o['nome']}": o for o in obras}
+    obras_map = {f"{o['cod4']} — {o['nome']}": o for o in obras}
     obra_sel_str = c1.selectbox("Selecione a Obra", list(obras_map.keys()), label_visibility="collapsed")
     obra_sel = obras_map[obra_sel_str]
     obra_id = obra_sel["id"]
