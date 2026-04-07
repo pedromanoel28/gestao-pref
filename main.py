@@ -497,45 +497,50 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         arquivo.seek(0)
                         df7 = pd.read_csv(arquivo, sep=None, engine="python",
                                           encoding="utf-8-sig", dtype=str, header=0)
-                        # Mapeamento flexível de colunas (vários formatos de ERP)
-                        rename7 = {}
-                        for c7 in df7.columns:
-                            cl7 = c7.lower().strip()
-                            if cl7 in ("obra","obra_codigo","cod_obra","codigo_obra"):
-                                rename7[c7] = "obra_codigo"
-                            elif cl7 in ("data","data_lancamento","dt_lancamento","data_doc"):
-                                rename7[c7] = "data"
-                            elif cl7 in ("id_lancamento","id","lancamento","id_lanc"):
-                                rename7[c7] = "id_lancamento"
-                            elif cl7 in ("numero_doc","num_doc","numero","ndoc","n_doc"):
-                                rename7[c7] = "numero_doc"
-                            elif cl7 in ("centro_custos","centro","cc","centro_de_custo"):
-                                rename7[c7] = "centro_custos"
-                            elif cl7 in ("conta_macro","macro","conta_gerencial_macro"):
-                                rename7[c7] = "conta_macro"
-                            elif cl7 in ("conta_gerencial","conta","gerencial"):
-                                rename7[c7] = "conta_gerencial"
-                            elif cl7 in ("cli_fornecedor","fornecedor","cliente","cli_forn",
-                                         "nome_fornecedor","nome_cliente"):
-                                rename7[c7] = "cli_fornecedor"
-                            elif cl7 in ("produto_servico","produto","servico","descricao",
-                                         "historico","desc"):
-                                rename7[c7] = "produto_servico"
-                            elif cl7 in ("criado_por","usuario","user","operador"):
-                                rename7[c7] = "criado_por"
-                            elif cl7 in ("valor_global","valor","total","vl_total","vl_global"):
-                                rename7[c7] = "valor_global"
-                            elif cl7 in ("qtd","quantidade","qtde","qty"):
-                                rename7[c7] = "qtd"
-                            elif cl7 in ("preco_unitario","preco","unit","vl_unit","valor_unit"):
-                                rename7[c7] = "preco_unitario"
-                            elif cl7 in ("origem","tipo_origem","fonte"):
-                                rename7[c7] = "origem"
-                            elif cl7 in ("chave_coligada","coligada","chave"):
-                                rename7[c7] = "chave_coligada"
-                            elif cl7 in ("cod_tipo_doc","tipo_doc","cod_tipo","tipo_documento"):
-                                rename7[c7] = "cod_tipo_doc"
-                        df7 = df7.rename(columns=rename7)
+                        # Mapeamento exato de colunas (nomes do Export.csv do ERP)
+                        col_map = {
+                            # nomes exatos do Export.csv do ERP
+                            "Data":                        "data",
+                            "data":                        "data",
+                            "IdLanç":                      "id_lancamento",
+                            "id_lancamento":               "id_lancamento",
+                            "NºDoc":                       "numero_doc",
+                            "numero_doc":                  "numero_doc",
+                            "Centro de Custos":            "centro_custos",
+                            "centro_custos":               "centro_custos",
+                            "Conta Macro":                 "conta_macro",
+                            "conta_macro":                 "conta_macro",
+                            "Conta Gerencial":             "conta_gerencial",
+                            "conta_gerencial":             "conta_gerencial",
+                            "Cli/For":                     "cli_fornecedor",
+                            "cli_fornecedor":              "cli_fornecedor",
+                            "fornecedor":                  "cli_fornecedor",
+                            "Produto_Serviço":             "produto_servico",
+                            "Produto_Servico":             "produto_servico",
+                            "produto_servico":             "produto_servico",
+                            "CriadoPor":                   "criado_por",
+                            "criado_por":                  "criado_por",
+                            "usuario":                     "criado_por",
+                            " Valor Global ":              "valor_global",
+                            "Valor Global":                "valor_global",
+                            "valor_global":                "valor_global",
+                            "valor":                       "valor_global",
+                            "Qtd":                         "qtd",
+                            "qtd":                         "qtd",
+                            "quantidade":                  "qtd",
+                            " PrecoUnitario ":             "preco_unitario",
+                            "PrecoUnitario":               "preco_unitario",
+                            "preco_unitario":              "preco_unitario",
+                            "Origem":                      "origem",
+                            "origem":                      "origem",
+                            "Chave_ColigadaIdOrigem":      "chave_coligada",
+                            "chave_coligada":              "chave_coligada",
+                            "Cód. e Tipo Doc/Movimento":   "cod_tipo_doc",
+                            "cod_tipo_doc":                "cod_tipo_doc",
+                        }
+                        # Strip de espaços nos nomes de colunas antes do rename
+                        df7.columns = [c.strip() for c in df7.columns]
+                        df7 = df7.rename(columns=col_map)
                         if "obra_codigo" not in df7.columns:
                             st.error("❌ Coluna de código de obra não encontrada. "
                                      "Renomeie para 'obra_codigo' e tente novamente.")
