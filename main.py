@@ -5342,9 +5342,7 @@ elif pagina_selecionada == "💸 Custos & Despesas":
     def carregar_receitas_dashboard():
         rows, page, size = [], 0, 5000
         while True:
-            resp = (supabase.table("receitas")
-                    .select("data, centro_custos, cli_fornecedor, valor_global,"
-                            " conta_gerencial, descricao, cod_tipo_doc")
+            resp = (supabase.table("receitas").select("*")
                     .range(page * size, (page + 1) * size - 1).execute())
             rows.extend(resp.data)
             if len(resp.data) < size:
@@ -5353,12 +5351,15 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         df = pd.DataFrame(rows)
         if df.empty:
             return df
-        df["data"]         = pd.to_datetime(df["data"], errors="coerce")
-        df["valor_global"] = pd.to_numeric(df["valor_global"], errors="coerce")
+        # Normaliza coluna de data (pode ser "data" ou "data_emissao")
+        if "data" not in df.columns and "data_emissao" in df.columns:
+            df["data"] = df["data_emissao"]
+        df["data"]         = pd.to_datetime(df.get("data"), errors="coerce")
+        df["valor_global"] = pd.to_numeric(df.get("valor_global"), errors="coerce")
         df["mes"]          = df["data"].dt.to_period("M").astype(str)
         df["ano"]          = df["data"].dt.year.astype(str)
-        df["cod4"]         = (df["centro_custos"].fillna("").astype(str)
-                              .str.extract(r"^(\d{4})", expand=False))
+        cc = df.get("centro_custos", pd.Series(dtype=str)).fillna("").astype(str)
+        df["cod4"] = cc.str.extract(r"^(\d{4})", expand=False)
         return df
 
     @st.cache_data(ttl=600)
