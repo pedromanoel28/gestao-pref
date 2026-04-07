@@ -541,13 +541,22 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         # Strip de espaços nos nomes de colunas antes do rename
                         df7.columns = [c.strip() for c in df7.columns]
                         df7 = df7.rename(columns=col_map)
-                        if "obra_codigo" not in df7.columns:
-                            st.error("❌ Coluna de código de obra não encontrada. "
-                                     "Renomeie para 'obra_codigo' e tente novamente.")
-                            st.stop()
                         mob7 = mapa_obras()
-                        df7["obra_id"] = aplicar_obra_id(
-                            df7["obra_codigo"].apply(extrair_codigo), mob7)
+                        # Tenta extrair obra de qualquer coluna com código de 4 dígitos
+                        # Se não encontrar, obra_id = NULL (comportamento esperado)
+                        cod4_encontrado = None
+                        for col_tentativa in ["obra_codigo", "obra", "Centro de Custos",
+                                              "centro_custos"]:
+                            if col_tentativa in df7.columns:
+                                serie = df7[col_tentativa].apply(extrair_codigo)
+                                if serie.notna().any():
+                                    cod4_encontrado = col_tentativa
+                                    break
+                        if cod4_encontrado:
+                            df7["obra_id"] = aplicar_obra_id(
+                                df7[col_tentativa].apply(extrair_codigo), mob7)
+                        else:
+                            df7["obra_id"] = None
                         df7 = df7.replace("", None).where(pd.notnull(df7), None)
                         com_obra7 = int(df7["obra_id"].notna().sum())
                         sem_obra7 = int(df7["obra_id"].isna().sum())
