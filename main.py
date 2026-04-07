@@ -467,7 +467,8 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         pacote3 = df3[cols_bd3].to_dict("records")
                         pacote3 = fix_ids(pacote3)
                         pacote3 = limpar_nan_pacote(pacote3)
-                        total3 = enviar_lotes("medicoes", pacote3, "Enviando medições...")
+                        total3 = enviar_lotes("medicoes", pacote3, "Enviando medições...",
+                                               on_conflict="numero_nf,tipo")
                         _inline_cache_clear()
                         st.success(f"🎉 {total3} medições importadas!")
                         st.info(
