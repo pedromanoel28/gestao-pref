@@ -453,21 +453,24 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                                 df11["titulo"].apply(extrair_codigo), mob)
                             sem_obra11 = int(df11["obra_id"].isna().sum())
 
-                            # Colunas que existem no banco (schema notas_fiscais)
+                            # Colunas que existem no banco (schema medicoes)
                             cols_bd11 = [
                                 "obra_id", "codigo_obra_original", "titulo",
-                                "etapa_obra", "data_acao", "nome_pagador",
+                                "etapa_obra", "data_emissao", "nome_pagador",
                                 "cnpj_pagador", "numero_nf", "numero_nf_remessa",
                                 "data_vencimento", "descricao", "valor",
                                 "cnpj_recebedor", "razao_social_recebedor",
                                 "tipo", "observacoes", "categoria",
                             ]
+                            # Renomeia data_acao → data_emissao para o banco
+                            if "data_acao" in df11.columns and "data_emissao" not in df11.columns:
+                                df11 = df11.rename(columns={"data_acao": "data_emissao"})
                             cols_bd11 = [c for c in cols_bd11 if c in df11.columns]
                             pacote11 = df11[cols_bd11].to_dict("records")
                             pacote11 = fix_ids(pacote11)
                             pacote11 = limpar_nan_pacote(pacote11)  # ← purga NaN residuais
-                            total11 = enviar_lotes("notas_fiscais", pacote11,
-                                                   "Enviando notas fiscais...")
+                            total11 = enviar_lotes("medicoes", pacote11,
+                                                   "Enviando medições...")
                             st.success(f"🎉 {total11} NFs importadas!")
                             st.info(
                                 f"✅ {total11 - sem_obra11} com obra vinculada  "
@@ -562,12 +565,12 @@ if pagina_selecionada == "📥 Importador de Arquivos":
 
                                 # ── PASSO 2: sincronizar tabela obras ─────────
                                 resp_obra = (supabase.table("obras")
-                                             .select("id, codigo, nome")
-                                             .eq("codigo", cod4)
+                                             .select("id, cod4, nome")
+                                             .eq("cod4", cod4)
                                              .execute())
                                 if not resp_obra.data:
                                     ins_obra = supabase.table("obras").insert({
-                                        "codigo": cod4,
+                                        "cod4":   cod4,
                                         "nome":   obra_nome_val,
                                         "status": "Em Andamento",
                                     }).execute()
@@ -937,10 +940,10 @@ def carregar_obras_completo():
 
 @st.cache_data(ttl=300)
 def carregar_medicoes_resumo():
-    """notas_fiscais sem canceladas/remessas, com campo mes."""
+    """medicoes sem canceladas/remessas, com campo mes."""
     rows, page, size = [], 0, 1000
-    q = supabase.table("notas_fiscais")\
-        .select("obra_id, data_acao, descricao, tipo, valor")
+    q = supabase.table("medicoes")\
+        .select("obra_id, data_emissao, descricao, tipo, valor")
     while True:
         resp = q.range(page * size, (page + 1) * size - 1).execute()
         rows.extend(resp.data)
@@ -951,9 +954,9 @@ def carregar_medicoes_resumo():
         return df
     excluir = {"NOTA FISCAL CANCELADA", "NOTA FISCAL REMESSA"}
     df = df[~df["tipo"].str.strip().str.upper().isin(excluir)].copy()
-    df["data_acao"] = pd.to_datetime(df["data_acao"], errors="coerce")
-    df["valor"]     = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
-    df["mes"]       = df["data_acao"].dt.to_period("M").astype(str)
+    df["data_emissao"] = pd.to_datetime(df["data_emissao"], errors="coerce")
+    df["valor"]        = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
+    df["mes"]          = df["data_emissao"].dt.to_period("M").astype(str)
     return df
 
 @st.cache_data(ttl=300)
@@ -1968,7 +1971,7 @@ elif pagina_selecionada == "💰 Financeiro":
         # Filtragem de tipo feita em Python — not_.in_ combinado com range()
         # causa APIError em certas versões do supabase-py
         rows, page, size = [], 0, 1000
-        q = supabase.table("notas_fiscais").select("obra_id, data_acao, descricao, tipo, valor")
+        q = supabase.table("medicoes").select("obra_id, data_emissao, descricao, tipo, valor")
         while True:
             resp = q.range(page * size, (page + 1) * size - 1).execute()
             rows.extend(resp.data)
@@ -1978,19 +1981,19 @@ elif pagina_selecionada == "💰 Financeiro":
         if df.empty: return df
         excluir = {"NOTA FISCAL CANCELADA", "NOTA FISCAL REMESSA"}
         df = df[~df["tipo"].str.strip().str.upper().isin(excluir)].copy()
-        df["valor"]     = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
-        df["data_acao"] = pd.to_datetime(df["data_acao"], errors="coerce")
-        df["mes"]       = df["data_acao"].dt.to_period("M").astype(str)
+        df["valor"]        = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
+        df["data_emissao"] = pd.to_datetime(df["data_emissao"], errors="coerce")
+        df["mes"]          = df["data_emissao"].dt.to_period("M").astype(str)
         return df
 
     @st.cache_data(ttl=300)
     def carregar_medicoes_completas(obra_id):
         # Seleciona colunas explícitas (sem *) e filtra tipo em Python
-        cols = ("obra_id, data_acao, numero_nf, numero_nf_remessa, "
+        cols = ("obra_id, data_emissao, numero_nf, numero_nf_remessa, "
                 "descricao, tipo, valor, nome_pagador, cnpj_recebedor, "
                 "razao_social_recebedor, etapa_obra, categoria, observacoes")
         rows, page, size = [], 0, 1000
-        q = supabase.table("notas_fiscais").select(cols).eq("obra_id", obra_id)
+        q = supabase.table("medicoes").select(cols).eq("obra_id", obra_id)
         while True:
             resp = q.range(page * size, (page + 1) * size - 1).execute()
             rows.extend(resp.data)
@@ -1999,9 +2002,9 @@ elif pagina_selecionada == "💰 Financeiro":
         df = pd.DataFrame(rows)
         if df.empty: return df
         df = df[df["tipo"].str.strip().str.upper() != "NOTA FISCAL CANCELADA"].copy()
-        df["valor"]     = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
-        df["data_acao"] = pd.to_datetime(df["data_acao"], errors="coerce")
-        df = df.sort_values("data_acao", ascending=False).reset_index(drop=True)
+        df["valor"]        = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
+        df["data_emissao"] = pd.to_datetime(df["data_emissao"], errors="coerce")
+        df = df.sort_values("data_emissao", ascending=False).reset_index(drop=True)
         return df
 
     def _carregar_volumes(tabela, col_vol, col_data):
@@ -2457,13 +2460,13 @@ elif pagina_selecionada == "💰 Financeiro":
         if df_nfs.empty:
             st.info("Nenhuma NF para esta obra.")
         else:
-            cols_nf = [c for c in ["data_acao", "numero_nf", "descricao", "tipo", "valor"]
+            cols_nf = [c for c in ["data_emissao", "numero_nf", "descricao", "tipo", "valor"]
                        if c in df_nfs.columns]
             df_nf_show = df_nfs[cols_nf].copy()
             df_nf_show["valor_fmt"] = df_nf_show["valor"].apply(fmt_brl_fin)
             st.dataframe(
                 df_nf_show.drop(columns=["valor"]).rename(columns={
-                    "data_acao":  "Data",
+                    "data_emissao": "Data",
                     "numero_nf":  "NF",
                     "descricao":  "Descrição",
                     "tipo":       "Tipo",
