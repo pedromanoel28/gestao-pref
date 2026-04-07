@@ -2217,12 +2217,8 @@ elif pagina_selecionada == "💰 Financeiro":
 
     @st.cache_data(ttl=300)
     def carregar_medicoes_completas(obra_id):
-        # Seleciona colunas explícitas (sem *) e filtra tipo em Python
-        cols = ("obra_id, data_emissao, numero_nf, numero_nf_remessa, "
-                "descricao, tipo, valor, nome_pagador, cnpj_recebedor, "
-                "razao_social_recebedor, etapa_obra, categoria, observacoes")
         rows, page, size = [], 0, 1000
-        q = supabase.table("medicoes").select(cols).eq("obra_id", obra_id)
+        q = supabase.table("medicoes").select("*").eq("obra_id", obra_id)
         while True:
             resp = q.range(page * size, (page + 1) * size - 1).execute()
             rows.extend(resp.data)
