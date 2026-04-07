@@ -475,6 +475,13 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         pacote_p = df_p[cols_bd_p_ok].to_dict("records")
                         pacote_p = fix_ids(pacote_p)
                         pacote_p = limpar_nan_pacote(pacote_p)
+                        # Deduplica por codigo (mesmo CSV pode ter duplicatas)
+                        _seen_cod = {}
+                        for _r in pacote_p:
+                            _k = _r.get("codigo")
+                            if _k is not None:
+                                _seen_cod[_k] = _r
+                        pacote_p = list(_seen_cod.values())
                         total_p = enviar_lotes(tabela_p, pacote_p,
                                                f"Enviando para {tabela_p}...",
                                                on_conflict="codigo")
