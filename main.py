@@ -72,7 +72,9 @@ def formatar_numero(serie):
                      .replace(",", ".")
                      .strip())
             r = float(limpo)
-            return None if _math.isnan(r) else r
+            if _math.isnan(r) or _math.isinf(r) or abs(r) >= 1e13:
+                return None
+            return r
         except Exception:
             return None
     return serie.apply(_conv)
