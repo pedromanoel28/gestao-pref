@@ -178,453 +178,391 @@ def enviar_lotes(tabela, pacote, barra_label="Enviando...", on_conflict=None):
 if pagina_selecionada == "📥 Importador de Arquivos":
     st.header("📥 Central de Importação")
 
-    st.info("""
-    **Ordem obrigatória:**
-    FASE 1 → Equipe, Obras, Template Jornada, Rotinas
-    FASE 2 → Extras, Tarefas
-    FASE 3 → Fabricação, Transporte, Montagem, Custos
-    FASE 4 → Notas Fiscais / Medições, Resumo Financeiro Obras
-    """)
+    import math as _math
+    import traceback as _tb
 
-    st.warning("""
-    ⚠️ **Use somente os CSVs padronizados** (arquivos `IMPORT_*.csv`).
-    Eles têm os títulos exatos que o sistema espera. Copie seus dados para dentro deles.
-    """)
+    # ── helpers locais ────────────────────────────────────────────────────────
+    def _limpar_num_imp(val):
+        if val is None or str(val).strip().lower() in ("", "nan", "nat", "none", "inf"):
+            return None
+        try:
+            v = float(str(val).replace("R$","").replace(" ","")
+                      .replace(".","").replace(",",".").strip())
+            return None if (_math.isnan(v) or _math.isinf(v)) else v
+        except Exception:
+            return None
 
+    def _limpar_str_imp(val):
+        if val is None or str(val).strip().lower() in ("", "nan", "nat", "none"):
+            return None
+        return str(val).strip()
+
+    def _inline_cache_clear():
+        try: carregar_obras_ativas.clear()
+        except: pass
+        try: carregar_obras_completo.clear()
+        except: pass
+        try: carregar_medicoes_resumo.clear()
+        except: pass
+        try: carregar_producao_resumo.clear()
+        except: pass
+        try: carregar_transporte_resumo.clear()
+        except: pass
+        try: carregar_montagem_resumo.clear()
+        except: pass
+        try: carregar_custos_resumo.clear()
+        except: pass
+        try: carregar_equipe_ativa.clear()
+        except: pass
+
+    # ── seleção de rota ───────────────────────────────────────────────────────
     opcao = st.selectbox("Qual arquivo está importando?", [
-        "1. [FASE 1] Equipe                  → 1_IMPORT_equipe.csv",
-        "2. [FASE 1] Obras Mães              → 2_IMPORT_obras.csv",
-        "3. [FASE 1] Template Jornada        → 3_IMPORT_template_jornada.csv",
-        "4. [FASE 1] Rotinas                 → 4_IMPORT_rotinas.csv",
-        "5. [FASE 2] Extras 1:1              → 5_IMPORT_extras.csv",
-        "6. [FASE 2] Tarefas / Súmulas       → 6_IMPORT_obras_tarefas.csv",
-        "7. [FASE 3] Fabricação              → 7_IMPORT_fabricacao.csv",
-        "8. [FASE 3] Transporte              → 8_IMPORT_transporte.csv",
-        "9. [FASE 3] Montagem                → 9_IMPORT_montagem.csv",
-        "10.[FASE 3] Custos / Financeiro     → 10_IMPORT_custos.csv",
-        "11.[FASE 4] Notas Fiscais / Medições  → Lista_Medição.csv",
-        "12.[FASE 4] Resumo Financeiro Obras   → Civil_Comercial_Estruturas_Custos_Obras.csv",
+        "1. Equipe              → qualquer CSV com colunas nome / email / setor / cargo",
+        "2. Financeiro Obras    → Civil_Comercial_*.csv",
+        "3. Medições            → Lista_Medição.csv",
+        "4. Fabricação          → exportação ERP peça a peça",
+        "5. Transporte          → exportação ERP expedição",
+        "6. Montagem            → exportação ERP montagem",
+        "7. Custos              → exportação ERP lançamentos",
     ])
-    rota = opcao.strip()[0:2].strip().rstrip(".")
+    rota = opcao.strip()[0]          # "1" … "7"
 
-    arquivo = st.file_uploader("Arraste o CSV padronizado aqui", type=["csv"])
+    arquivo = st.file_uploader("Arraste o CSV aqui", type=["csv"])
 
     if arquivo:
+        # ── leitura automática (sep ; ou ,) ───────────────────────────────────
         try:
-            df = pd.read_csv(arquivo, sep=";", encoding="utf-8-sig", dtype=str)
-            st.success(f"✅ {df.shape[0]} linhas | Colunas: {list(df.columns)}")
-
-            if st.button("🚀 Importar", type="primary"):
-                with st.spinner("Processando..."):
-                    try:
-
-                        # ── ROTA 1: EQUIPE ──────────────────────────────────
-                        # Colunas: nome, email, setor, status
-                        if rota == "1":
-                            df = nulos(df)
-                            pacote = df[["nome","email","setor","status"]].to_dict("records")
-                            supabase.table("equipe").insert(pacote).execute()
-                            st.success(f"🎉 {len(pacote)} colaboradores importados!")
-
-                        # ── ROTA 2: OBRAS ────────────────────────────────────
-                        # Colunas: codigo, nome, status
-                        elif rota == "2":
-                            df = nulos(df)
-                            pacote = df[["codigo","nome","status"]].to_dict("records")
-                            supabase.table("obras").upsert(pacote, on_conflict="nome").execute()
-                            st.success(f"🎉 {len(pacote)} obras importadas!")
-
-                        # ── ROTA 3: TEMPLATE JORNADA ─────────────────────────
-                        # Colunas: item, etapa, descricao, status_padrao
-                        elif rota == "3":
-                            df["item"] = pd.to_numeric(df["item"], errors="coerce")
-                            df = nulos(df)
-                            pacote = df[["item","etapa","descricao","status_padrao"]].to_dict("records")
-                            pacote = fix_ids(pacote)
-                            supabase.table("template_jornada").insert(pacote).execute()
-                            st.success(f"🎉 {len(pacote)} itens do template importados!")
-
-                        # ── ROTA 4: ROTINAS ──────────────────────────────────
-                        # Colunas: setor, frequencia, atividade
-                        elif rota == "4":
-                            df = nulos(df)
-                            pacote = df[["setor","frequencia","atividade"]].to_dict("records")
-                            supabase.table("rotinas").insert(pacote).execute()
-                            st.success(f"🎉 {len(pacote)} rotinas importadas!")
-
-                        # ── ROTA 5: EXTRAS ───────────────────────────────────
-                        # Colunas: colaborador_nome, origem, descricao, status,
-                        #          prazo, entrega_real, observacao
-                        elif rota == "5":
-                            meq = mapa_equipe()
-                            df["colaborador_id"] = df["colaborador_nome"].apply(normalize).map(meq)
-                            df["prazo"]        = formatar_data(df["prazo"])
-                            df["entrega_real"] = formatar_data(df["entrega_real"])
-                            ignorados = df["colaborador_id"].isna().sum()
-                            df = nulos(df.dropna(subset=["colaborador_id"]))
-                            pacote = df[["colaborador_id","origem","descricao",
-                                         "status","prazo","entrega_real","observacao"]].to_dict("records")
-                            pacote = fix_ids(pacote)
-                            supabase.table("extras").insert(pacote).execute()
-                            st.success(f"🎉 {len(pacote)} extras importados!")
-                            if ignorados: st.warning(f"⚠️ {ignorados} linha(s) ignorada(s): colaborador não encontrado.")
-
-                        # ── ROTA 6: OBRAS TAREFAS ────────────────────────────
-                        # Colunas: obra_codigo, item, etapa, descricao,
-                        #          R, A, C, I, status,
-                        #          inicio_previsto, entrega_prevista, entrega_real, observacoes
-                        elif rota == "6":
-                            mob = mapa_obras()
-                            meq = mapa_equipe()
-                            pacote, ignorados = [], 0
-
-                            for _, row in df.iterrows():
-                                cod = extrair_codigo(row.get("obra_codigo"))
-                                obra_id = mob.get(cod) if cod else None
-                                if not obra_id:
-                                    ignorados += 1; continue
-
-                                def eq_id(col):
-                                    return meq.get(normalize(row.get(col)))
-
-                                pacote.append({
-                                    "obra_id":          int(obra_id),
-                                    "item":             clean_str(row.get("item")),
-                                    "etapa":            clean_str(row.get("etapa")),
-                                    "descricao":        clean_str(row.get("descricao")),
-                                    "responsavel_id":   int(eq_id("R")) if eq_id("R") else None,
-                                    "aprovador_id":     int(eq_id("A")) if eq_id("A") else None,
-                                    "consultado_id":    int(eq_id("C")) if eq_id("C") else None,
-                                    "informado_id":     int(eq_id("I")) if eq_id("I") else None,
-                                    "status":           clean_str(row.get("status")) or "A Iniciar",
-                                    "inicio_previsto":  formatar_data_valor(row.get("inicio_previsto")),
-                                    "entrega_prevista": formatar_data_valor(row.get("entrega_prevista")),
-                                    "entrega_real":     formatar_data_valor(row.get("entrega_real")),
-                                    "observacoes":      clean_str(row.get("observacoes")),
-                                })
-
-                            if pacote:
-                                supabase.table("obras_tarefas").insert(pacote).execute()
-                                st.success(f"🎉 {len(pacote)} tarefas importadas!")
-                                if ignorados: st.warning(f"⚠️ {ignorados} linha(s) ignorada(s): obra não encontrada.")
-                            else:
-                                st.error("❌ Nenhuma tarefa válida. Verifique a coluna obra_codigo.")
-
-                        # ── ROTAS 7, 8, 9: PRODUÇÃO ──────────────────────────
-                        elif rota in ["7","8","9"]:
-
-                            # ── Renomear colunas por posição (imune a acentos) ─
-                            if rota == "7":
-                                _nomes_prod = [
-                                    "peca","codigo","obra_codigo","etapa","produto",
-                                    "secao","qtde_pecas","volume_total","data_fabricacao",
-                                    "volume_teorico","peso_aco","peso_aco_frouxo",
-                                    "peso_aco_protendido","comprimento",
-                                ]
-                            elif rota == "8":
-                                _nomes_prod = [
-                                    "peca","codigo","obra_codigo","etapa","produto",
-                                    "data_expedicao","volume_real","status","peso",
-                                    "numero_carga","transportadora","motorista","nota_fiscal",
-                                ]
-                            else:
-                                _nomes_prod = [
-                                    "peca","codigo","obra_codigo","etapa","produto",
-                                    "secao","qtde_pecas","volume_total","data_montagem",
-                                    "volume_teorico","peso",
-                                ]
-                            _np = min(len(_nomes_prod), len(df.columns))
-                            df.columns = _nomes_prod[:_np] + list(df.columns[_np:])
-
-                            mob = mapa_obras()
-                            df["obra_id"] = aplicar_obra_id(
-                                df["obra_codigo"].apply(extrair_codigo), mob)
-                            sem_obra = int(df["obra_id"].isna().sum())
-                            # Preserva linhas sem obra (obra_id NULL) — não descarta
-
-                            if rota == "7":
-                                tabela   = "producao_fabricacao"
-                                num_cols = ["qtde_pecas","volume_total","volume_teorico",
-                                            "peso_aco","peso_aco_frouxo",
-                                            "peso_aco_protendido","comprimento"]
-                                date_col = "data_fabricacao"
-                                cols_bd  = ["obra_id","peca","codigo","etapa","produto","secao",
-                                            "qtde_pecas","volume_total","data_fabricacao",
-                                            "volume_teorico","peso_aco","peso_aco_frouxo",
-                                            "peso_aco_protendido","comprimento"]
-                            elif rota == "8":
-                                tabela   = "producao_transporte"
-                                num_cols = ["volume_real","peso","numero_carga"]
-                                date_col = "data_expedicao"
-                                cols_bd  = ["obra_id","peca","codigo","etapa","produto",
-                                            "data_expedicao","volume_real","status","peso",
-                                            "numero_carga","transportadora","motorista",
-                                            "nota_fiscal"]
-                            else:
-                                tabela   = "producao_montagem"
-                                num_cols = ["qtde_pecas","volume_total","volume_teorico","peso"]
-                                date_col = "data_montagem"
-                                cols_bd  = ["obra_id","peca","codigo","etapa","produto","secao",
-                                            "qtde_pecas","volume_total","data_montagem",
-                                            "volume_teorico","peso"]
-
-                            df[date_col] = formatar_data(df[date_col])
-                            for c in num_cols:
-                                if c in df.columns: df[c] = formatar_numero(df[c])
-                            df = nulos(df)
-                            pacote = df[cols_bd].to_dict("records")
-                            pacote = fix_ids(pacote)
-                            total = enviar_lotes(tabela, pacote, f"Enviando para {tabela}...",
-                                                 on_conflict="codigo")
-                            st.success(f"🎉 {total} registros atualizados em {tabela}!")
-                            com_obra = total - sem_obra
-                            st.info(f"✅ {com_obra} com obra vinculada"
-                                    + (f" | ⚠️ {sem_obra} sem obra (obra_id NULL)" if sem_obra else ""))
-
-                        # ── ROTA 10: CUSTOS ──────────────────────────────────
-                        # (mantido abaixo; rotas 11 e 12 adicionadas ao final)
-                        # CSV já vem pré-processado (datas e números convertidos)
-                        elif rota == "10":
-                            mob = mapa_obras()
-                            df["obra_id"] = aplicar_obra_id(df["obra_codigo"].apply(extrair_codigo), mob)
-                            df = df.replace("", None)
-                            df = df.where(pd.notnull(df), None)
-                            com_obra = df["obra_id"].notna().sum()
-                            sem_obra = df["obra_id"].isna().sum()
-                            cols_bd = ["obra_id","data","id_lancamento","numero_doc",
-                                       "centro_custos","conta_macro","conta_gerencial",
-                                       "cli_fornecedor","produto_servico","criado_por",
-                                       "valor_global","qtd","preco_unitario","origem",
-                                       "chave_coligada","cod_tipo_doc"]
-                            for col in ["valor_global","qtd","preco_unitario"]:
-                                df[col] = pd.to_numeric(df[col], errors="coerce")
-                                df[col] = df[col].where(pd.notnull(df[col]), None)
-                            import math as _m
-                            pacote_limpo = []
-                            for row in df[cols_bd].to_dict("records"):
-                                pacote_limpo.append({
-                                    k: None if (
-                                        v is None
-                                        or (isinstance(v, float) and (_m.isnan(v) or _m.isinf(v)))
-                                        or str(v).strip().lower() in ("nan","nat","none","inf","")
-                                    ) else v
-                                    for k, v in row.items()
-                                })
-                            total = enviar_lotes("custos", pacote_limpo, "Enviando custos...")
-                            st.success(f"🎉 {total} registros importados!")
-                            st.info(f"✅ {com_obra} custos diretos (com obra) | 🏭 {sem_obra} custos indiretos (sem obra)")
-
-                        # ── ROTA 11: NOTAS FISCAIS / MEDIÇÕES ────────────────
-                        # Fonte: Lista_Medição.csv — colunas mapeadas por posição
-                        elif rota == "11":
-                            arquivo.seek(0)
-                            df11 = pd.read_csv(arquivo, sep=None, engine="python",
-                                               encoding="utf-8-sig", dtype=str, header=0)
-
-                            # Renomear por posição — imune a acentos no cabeçalho
-                            nomes11 = [
-                                "codigo_obra_original", "titulo", "etapa_obra",
-                                "data_emissao", "nome_pagador", "cnpj_pagador",
-                                "numero_nf", "numero_nf_remessa", "data_vencimento",
-                                "descricao", "valor", "cnpj_recebedor",
-                                "razao_social_recebedor", "tipo", "observacoes", "categoria",
-                            ]
-                            df11 = df11.rename(columns={
-                                df11.columns[i]: nomes11[i]
-                                for i in range(min(len(df11.columns), len(nomes11)))
-                            })
-
-                            # Ignorar NFs canceladas antes de qualquer processamento
-                            mask_cancel = (df11["tipo"].str.strip().str.upper()
-                                           == "NOTA FISCAL CANCELADA")
-                            n_canceladas = int(mask_cancel.sum())
-                            df11 = df11[~mask_cancel].copy()
-
-                            # Converter datas DD/MM/YYYY → YYYY-MM-DD
-                            df11["data_emissao"]    = formatar_data(df11["data_emissao"])
-                            df11["data_vencimento"] = formatar_data(df11["data_vencimento"])
-
-                            # Limpar valor monetário → float ou None
-                            df11["valor"] = formatar_numero(df11["valor"])
-
-                            # obra_id via código 4 dígitos na coluna titulo (pode ser NULL)
-                            mob = mapa_obras()
-                            df11["obra_id"] = aplicar_obra_id(
-                                df11["titulo"].apply(extrair_codigo), mob)
-                            sem_obra11 = int(df11["obra_id"].isna().sum())
-
-                            # Colunas que existem no banco (schema medicoes)
-                            cols_bd11 = [
-                                "obra_id", "codigo_obra_original", "titulo",
-                                "etapa_obra", "data_emissao", "nome_pagador",
-                                "cnpj_pagador", "numero_nf", "numero_nf_remessa",
-                                "data_vencimento", "descricao", "valor",
-                                "cnpj_recebedor", "razao_social_recebedor",
-                                "tipo", "observacoes", "categoria",
-                            ]
-                            cols_bd11 = [c for c in cols_bd11 if c in df11.columns]
-                            pacote11 = df11[cols_bd11].to_dict("records")
-                            pacote11 = fix_ids(pacote11)
-                            pacote11 = limpar_nan_pacote(pacote11)  # ← purga NaN residuais
-                            total11 = enviar_lotes("medicoes", pacote11,
-                                                   "Enviando medições...")
-                            st.success(f"🎉 {total11} NFs importadas!")
-                            st.info(
-                                f"✅ {total11 - sem_obra11} com obra vinculada  "
-                                f"| ⚠️ {sem_obra11} sem obra  "
-                                f"| 🚫 {n_canceladas} canceladas ignoradas")
-
-                        # ── ROTA 12: RESUMO FINANCEIRO OBRAS ─────────────────
-                        # Fonte: Civil_Comercial_Estruturas_Custos_Obras.csv
-                        # Lógica: sync obras + upsert obras_financeiro (sem duplicatas)
-                        elif rota == "12":
-                            import math as _m12
-                            arquivo.seek(0)
-                            df12 = pd.read_csv(arquivo, sep=None, engine="python",
-                                               encoding="utf-8-sig", dtype=str, header=0)
-
-                            # Renomear por posição (imune a acentos/encoding)
-                            nomes12 = [
-                                "data_contrato", "codigo_produto", "obra_nome",
-                                "volume", "faturamento_total", "faturamento_civil",
-                                "faturamento_direto", "custo_total", "despesas_indiretas",
-                                "impostos", "lucro", "cimento_cliente_ton", "cimento_civil_ton",
-                                "chave_coligada", "razao_social", "cnpj", "responsavel",
-                                "email", "_tipo_item", "_caminho",
-                                "volume_projeto", "concreto", "aco_estrutural", "formas",
-                                "mo_producao", "eps", "estuque", "projetos",
-                                "descida_agua", "insertos", "consoles", "investimentos",
-                                "materiais_consumo", "equip_fab", "custos_indiretos",
-                                "pecas_consorcio", "frete", "equip_montagem", "mo_montagem",
-                                "neoprene", "despesas_equipe", "topografia", "mobilizacao",
-                                "equip_aux_montagem", "outros", "eventuais", "despesas_comerciais",
-                                "_extra1", "_extra2", "_extra3",
-                            ]
-                            df12 = df12.rename(columns={
-                                df12.columns[i]: nomes12[i]
-                                for i in range(min(len(df12.columns), len(nomes12)))
-                            })
-
-                            texto12 = {"data_contrato", "codigo_produto", "obra_nome",
-                                       "chave_coligada", "razao_social", "cnpj",
-                                       "responsavel", "email"}
-                            cols_num12 = [c for c in nomes12
-                                          if c not in texto12 and c in df12.columns]
-                            cols_bd12 = [
-                                "cod4", "data_contrato", "codigo_produto", "obra_nome",
-                                "chave_coligada", "razao_social", "cnpj", "responsavel",
-                                "email", "volume", "volume_projeto", "faturamento_total",
-                                "faturamento_civil", "faturamento_direto", "custo_total",
-                                "despesas_indiretas", "impostos", "lucro", "concreto",
-                                "aco_estrutural", "formas", "mo_producao", "eps", "estuque",
-                                "projetos", "descida_agua", "insertos", "consoles",
-                                "investimentos", "neoprene", "materiais_consumo", "equip_fab",
-                                "custos_indiretos", "pecas_consorcio", "frete",
-                                "equip_montagem", "mo_montagem", "despesas_equipe",
-                                "topografia", "mobilizacao", "equip_aux_montagem",
-                                "outros", "eventuais", "despesas_comerciais",
-                                "cimento_cliente_ton", "cimento_civil_ton",
-                            ]
-
-                            def limpar_num(val):
-                                """Limpa valor numérico individual → float ou None."""
-                                if val is None or str(val).strip() in ("", "nan", "NaN"):
-                                    return None
-                                try:
-                                    limpo = (str(val).replace("R$","").replace(" ","")
-                                             .replace(".","").replace(",",".").strip())
-                                    r = float(limpo)
-                                    return None if (_m12.isnan(r) or _m12.isinf(r)) else r
-                                except Exception:
-                                    return None
-
-                            def limpar_str(val):
-                                """Limpa string — retorna None se vazio/NaN."""
-                                if val is None or str(val).strip().lower() in (
-                                        "", "nan", "nat", "none"):
-                                    return None
-                                return str(val).strip()
-
-                            criadas = inseridas = atualizadas = sem_codigo = 0
-                            barra12 = st.progress(0, text="Processando obras...")
-                            total12 = len(df12)
-
-                            for idx, row in df12.iterrows():
-                                barra12.progress((idx + 1) / total12,
-                                                 text=f"{idx + 1}/{total12} linhas")
-
-                                # ── PASSO 1: código da obra ───────────────────
-                                cod4 = extrair_codigo(row.get("obra_nome", ""))
-                                if not cod4:
-                                    sem_codigo += 1
-                                    continue
-
-                                obra_nome_val = limpar_str(row.get("obra_nome"))
-
-                                # ── PASSO 2: sincronizar tabela obras ─────────
-                                resp_obra = (supabase.table("obras")
-                                             .select("id, cod4, nome")
-                                             .eq("cod4", cod4)
-                                             .execute())
-                                if not resp_obra.data:
-                                    ins_obra = supabase.table("obras").insert({
-                                        "cod4":   cod4,
-                                        "nome":   obra_nome_val,
-                                        "status": "Em Andamento",
-                                    }).execute()
-                                    obra_id = int(ins_obra.data[0]["id"])
-                                    criadas += 1
-                                else:
-                                    obra_id = int(resp_obra.data[0]["id"])
-                                    supabase.table("obras").update(
-                                        {"nome": obra_nome_val}
-                                    ).eq("id", obra_id).execute()
-
-                                # ── PASSO 3: montar payload obras_financeiro ──
-                                payload12 = {"cod4": cod4}
-                                payload12["data_contrato"] = formatar_data_valor(
-                                    row.get("data_contrato"))
-                                for campo in ["codigo_produto", "obra_nome", "chave_coligada",
-                                              "razao_social", "cnpj", "responsavel", "email"]:
-                                    if campo in df12.columns:
-                                        payload12[campo] = limpar_str(row.get(campo))
-                                for campo in cols_num12:
-                                    if campo in df12.columns:
-                                        payload12[campo] = limpar_num(row.get(campo))
-
-                                # Garantir apenas colunas do schema
-                                payload12 = {k: v for k, v in payload12.items()
-                                             if k in cols_bd12}
-
-                                # ── PASSO 4: upsert obras_financeiro via cod4 ─
-                                resp_fin = (supabase.table("obras_financeiro")
-                                            .select("cod4")
-                                            .eq("cod4", cod4)
-                                            .execute())
-                                if not resp_fin.data:
-                                    supabase.table("obras_financeiro").insert(
-                                        payload12).execute()
-                                    inseridas += 1
-                                else:
-                                    supabase.table("obras_financeiro").update(
-                                        payload12).eq("cod4", cod4).execute()
-                                    atualizadas += 1
-
-                            limpar_cache()
-                            st.success(
-                                f"🎉 {inseridas + atualizadas} registros processados")
-                            st.info(
-                                f"✅ {criadas} obras novas criadas  "
-                                f"| {inseridas} obras_financeiro inseridas  "
-                                f"| {atualizadas} atualizadas")
-                            if sem_codigo:
-                                st.warning(
-                                    f"⚠️ {sem_codigo} linha(s) sem código válido ignorada(s)")
-
-                    except Exception as e:
-                        st.error(f"❌ Erro no banco: {e}")
+            arquivo.seek(0)
+            df_prev = pd.read_csv(arquivo, sep=None, engine="python",
+                                  encoding="utf-8-sig", dtype=str, header=0)
+            with st.expander(f"👁️ Pré-visualização — {df_prev.shape[0]} linhas × {df_prev.shape[1]} colunas"):
+                st.dataframe(df_prev.head(10), use_container_width=True)
         except Exception as e:
-            st.error(f"❌ Erro na leitura do CSV: {e}")
+            st.error(f"❌ Erro ao ler CSV: {e}")
+            st.stop()
+
+        if st.button("🚀 Importar", type="primary"):
+            with st.spinner("Processando..."):
+                try:
+
+                    # ══ ROTA 1 — EQUIPE ══════════════════════════════════════
+                    if rota == "1":
+                        df1 = df_prev.copy()
+                        # Aceita variações de nome de coluna
+                        rename1 = {}
+                        for c in df1.columns:
+                            cl = c.lower().strip()
+                            if cl in ("nome","name","colaborador"): rename1[c] = "nome"
+                            elif cl in ("email","e-mail","e_mail"):  rename1[c] = "email"
+                            elif cl in ("setor","area","departamento"): rename1[c] = "setor"
+                            elif cl in ("cargo","funcao","função","role"): rename1[c] = "cargo"
+                            elif cl in ("status","ativo"): rename1[c] = "status"
+                        df1 = df1.rename(columns=rename1)
+                        # Colunas obrigatórias
+                        for col in ["nome"]:
+                            if col not in df1.columns:
+                                st.error(f"❌ Coluna obrigatória '{col}' não encontrada.")
+                                st.stop()
+                        # Opcionais: preenche None se ausentes
+                        for col in ["email","setor","cargo","status"]:
+                            if col not in df1.columns:
+                                df1[col] = None
+                        df1 = nulos(df1)
+                        pacote1 = df1[["nome","email","setor","cargo","status"]].to_dict("records")
+                        supabase.table("equipe").insert(pacote1).execute()
+                        _inline_cache_clear()
+                        st.success(f"🎉 {len(pacote1)} colaboradores importados!")
+
+                    # ══ ROTA 2 — FINANCEIRO OBRAS ═════════════════════════════
+                    elif rota == "2":
+                        arquivo.seek(0)
+                        df2 = pd.read_csv(arquivo, sep=None, engine="python",
+                                          encoding="utf-8-sig", dtype=str, header=0)
+                        nomes2 = [
+                            "data_contrato", "codigo_produto", "obra_nome",
+                            "volume", "faturamento_total", "faturamento_civil",
+                            "faturamento_direto", "custo_total", "despesas_indiretas",
+                            "impostos", "lucro", "cimento_cliente_ton", "cimento_civil_ton",
+                            "chave_coligada", "razao_social", "cnpj", "responsavel",
+                            "email", "_tipo_item", "_caminho",
+                            "volume_projeto", "concreto", "aco_estrutural", "formas",
+                            "mo_producao", "eps", "estuque", "projetos",
+                            "descida_agua", "insertos", "consoles", "investimentos",
+                            "materiais_consumo", "equip_fab", "custos_indiretos",
+                            "pecas_consorcio", "frete", "equip_montagem", "mo_montagem",
+                            "neoprene", "despesas_equipe", "topografia", "mobilizacao",
+                            "equip_aux_montagem", "outros", "eventuais", "despesas_comerciais",
+                            "_extra1", "_extra2", "_extra3",
+                        ]
+                        df2 = df2.rename(columns={
+                            df2.columns[i]: nomes2[i]
+                            for i in range(min(len(df2.columns), len(nomes2)))
+                        })
+                        _texto2 = {"data_contrato","codigo_produto","obra_nome",
+                                   "chave_coligada","razao_social","cnpj","responsavel","email"}
+                        _cols_num2 = [c for c in nomes2
+                                      if c not in _texto2 and not c.startswith("_")
+                                      and c in df2.columns]
+                        cols_bd2 = [
+                            "cod4","data_contrato","codigo_produto","obra_nome",
+                            "chave_coligada","razao_social","cnpj","responsavel","email",
+                            "volume","volume_projeto","faturamento_total","faturamento_civil",
+                            "faturamento_direto","custo_total","despesas_indiretas",
+                            "impostos","lucro","concreto","aco_estrutural","formas",
+                            "mo_producao","eps","estuque","projetos","descida_agua",
+                            "insertos","consoles","investimentos","neoprene",
+                            "materiais_consumo","equip_fab","custos_indiretos",
+                            "pecas_consorcio","frete","equip_montagem","mo_montagem",
+                            "despesas_equipe","topografia","mobilizacao","equip_aux_montagem",
+                            "outros","eventuais","despesas_comerciais",
+                            "cimento_cliente_ton","cimento_civil_ton",
+                        ]
+                        criadas2 = inseridas2 = atualizadas2 = sem_cod2 = 0
+                        barra2 = st.progress(0, text="Processando...")
+                        tot2 = len(df2)
+                        for idx2, row2 in df2.iterrows():
+                            barra2.progress((idx2+1)/tot2, text=f"{idx2+1}/{tot2}")
+                            cod4 = extrair_codigo(row2.get("obra_nome",""))
+                            if not cod4:
+                                sem_cod2 += 1; continue
+                            nome_val = _limpar_str_imp(row2.get("obra_nome"))
+                            r_obra = (supabase.table("obras").select("id,cod4,nome")
+                                      .eq("cod4", cod4).execute())
+                            if not r_obra.data:
+                                ins2 = supabase.table("obras").insert({
+                                    "cod4": cod4, "nome": nome_val, "status": "Em Andamento"
+                                }).execute()
+                                criadas2 += 1
+                            else:
+                                supabase.table("obras").update(
+                                    {"nome": nome_val}
+                                ).eq("cod4", cod4).execute()
+                            payload2 = {"cod4": cod4}
+                            payload2["data_contrato"] = formatar_data_valor(row2.get("data_contrato"))
+                            for campo in ["codigo_produto","obra_nome","chave_coligada",
+                                          "razao_social","cnpj","responsavel","email"]:
+                                if campo in df2.columns:
+                                    payload2[campo] = _limpar_str_imp(row2.get(campo))
+                            for campo in _cols_num2:
+                                if campo in df2.columns:
+                                    payload2[campo] = _limpar_num_imp(row2.get(campo))
+                            payload2 = {k: v for k, v in payload2.items() if k in cols_bd2}
+                            r_fin2 = (supabase.table("obras_financeiro").select("cod4")
+                                      .eq("cod4", cod4).execute())
+                            if not r_fin2.data:
+                                supabase.table("obras_financeiro").insert(payload2).execute()
+                                inseridas2 += 1
+                            else:
+                                supabase.table("obras_financeiro").update(payload2).eq("cod4", cod4).execute()
+                                atualizadas2 += 1
+                        _inline_cache_clear()
+                        st.success(f"🎉 {inseridas2 + atualizadas2} registros processados")
+                        st.info(f"✅ {criadas2} obras novas  | {inseridas2} inseridas  | {atualizadas2} atualizadas")
+                        if sem_cod2:
+                            st.warning(f"⚠️ {sem_cod2} linha(s) sem código válido ignoradas")
+
+                    # ══ ROTA 3 — MEDIÇÕES ═════════════════════════════════════
+                    elif rota == "3":
+                        arquivo.seek(0)
+                        df3 = pd.read_csv(arquivo, sep=None, engine="python",
+                                          encoding="utf-8-sig", dtype=str, header=0)
+                        nomes3 = [
+                            "codigo_obra_original","titulo","etapa_obra",
+                            "data_emissao","nome_pagador","cnpj_pagador",
+                            "numero_nf","numero_nf_remessa","data_vencimento",
+                            "descricao","valor","cnpj_recebedor",
+                            "razao_social_recebedor","tipo","observacoes","categoria",
+                        ]
+                        df3 = df3.rename(columns={
+                            df3.columns[i]: nomes3[i]
+                            for i in range(min(len(df3.columns), len(nomes3)))
+                        })
+                        mask_cancel3 = (df3["tipo"].str.strip().str.upper()
+                                        == "NOTA FISCAL CANCELADA")
+                        n_cancel3 = int(mask_cancel3.sum())
+                        df3 = df3[~mask_cancel3].copy()
+                        df3["data_emissao"]    = formatar_data(df3["data_emissao"])
+                        df3["data_vencimento"] = formatar_data(df3["data_vencimento"])
+                        df3["valor"]           = formatar_numero(df3["valor"])
+                        mob3 = mapa_obras()
+                        df3["obra_id"] = aplicar_obra_id(
+                            df3["titulo"].apply(extrair_codigo), mob3)
+                        sem_obra3 = int(df3["obra_id"].isna().sum())
+                        cols_bd3 = [
+                            "obra_id","codigo_obra_original","titulo","etapa_obra",
+                            "data_emissao","nome_pagador","cnpj_pagador","numero_nf",
+                            "numero_nf_remessa","data_vencimento","descricao","valor",
+                            "cnpj_recebedor","razao_social_recebedor","tipo",
+                            "observacoes","categoria",
+                        ]
+                        cols_bd3 = [c for c in cols_bd3 if c in df3.columns]
+                        pacote3 = df3[cols_bd3].to_dict("records")
+                        pacote3 = fix_ids(pacote3)
+                        pacote3 = limpar_nan_pacote(pacote3)
+                        total3 = enviar_lotes("medicoes", pacote3, "Enviando medições...")
+                        _inline_cache_clear()
+                        st.success(f"🎉 {total3} medições importadas!")
+                        st.info(
+                            f"✅ {total3 - sem_obra3} com obra  "
+                            f"| ⚠️ {sem_obra3} sem obra  "
+                            f"| 🚫 {n_cancel3} canceladas ignoradas")
+
+                    # ══ ROTAS 4 / 5 / 6 — PRODUÇÃO ═══════════════════════════
+                    elif rota in ["4","5","6"]:
+                        arquivo.seek(0)
+                        df_p = pd.read_csv(arquivo, sep=None, engine="python",
+                                           encoding="utf-8-sig", dtype=str, header=0)
+                        if rota == "4":
+                            _np_nomes = [
+                                "peca","codigo","obra_codigo","etapa","produto",
+                                "secao","qtde_pecas","volume_total","data_fabricacao",
+                                "volume_teorico","peso_aco","peso_aco_frouxo",
+                                "peso_aco_protendido","comprimento",
+                            ]
+                            tabela_p  = "producao_fabricacao"
+                            num_p     = ["qtde_pecas","volume_total","volume_teorico",
+                                         "peso_aco","peso_aco_frouxo",
+                                         "peso_aco_protendido","comprimento"]
+                            date_p    = "data_fabricacao"
+                            cols_bd_p = ["obra_id","cod4_obra","peca","codigo","etapa","produto",
+                                         "secao","qtde_pecas","volume_total","data_fabricacao",
+                                         "volume_teorico","peso_aco","peso_aco_frouxo",
+                                         "peso_aco_protendido","comprimento"]
+                        elif rota == "5":
+                            _np_nomes = [
+                                "peca","codigo","obra_codigo","etapa","produto",
+                                "data_expedicao","volume_real","status","peso",
+                                "numero_carga","transportadora","motorista","nota_fiscal",
+                            ]
+                            tabela_p  = "producao_transporte"
+                            num_p     = ["volume_real","peso","numero_carga"]
+                            date_p    = "data_expedicao"
+                            cols_bd_p = ["obra_id","cod4_obra","peca","codigo","etapa","produto",
+                                         "data_expedicao","volume_real","status","peso",
+                                         "numero_carga","transportadora","motorista","nota_fiscal"]
+                        else:
+                            _np_nomes = [
+                                "peca","codigo","obra_codigo","etapa","produto",
+                                "secao","qtde_pecas","volume_total","data_montagem",
+                                "volume_teorico","peso",
+                            ]
+                            tabela_p  = "producao_montagem"
+                            num_p     = ["qtde_pecas","volume_total","volume_teorico","peso"]
+                            date_p    = "data_montagem"
+                            cols_bd_p = ["obra_id","cod4_obra","peca","codigo","etapa","produto",
+                                         "secao","qtde_pecas","volume_total","data_montagem",
+                                         "volume_teorico","peso"]
+                        _np_n = min(len(_np_nomes), len(df_p.columns))
+                        df_p.columns = _np_nomes[:_np_n] + list(df_p.columns[_np_n:])
+                        mob_p = mapa_obras()
+                        df_p["obra_id"]   = aplicar_obra_id(
+                            df_p["obra_codigo"].apply(extrair_codigo), mob_p)
+                        df_p["cod4_obra"] = df_p["obra_codigo"].apply(extrair_codigo)
+                        sem_obra_p = int(df_p["obra_id"].isna().sum())
+                        df_p[date_p] = formatar_data(df_p[date_p])
+                        for c_p in num_p:
+                            if c_p in df_p.columns:
+                                df_p[c_p] = formatar_numero(df_p[c_p])
+                        df_p = nulos(df_p)
+                        # Manter só colunas que existem
+                        cols_bd_p_ok = [c for c in cols_bd_p if c in df_p.columns]
+                        pacote_p = df_p[cols_bd_p_ok].to_dict("records")
+                        pacote_p = fix_ids(pacote_p)
+                        total_p = enviar_lotes(tabela_p, pacote_p,
+                                               f"Enviando para {tabela_p}...",
+                                               on_conflict="codigo")
+                        _inline_cache_clear()
+                        st.success(f"🎉 {total_p} registros atualizados em {tabela_p}!")
+                        st.info(
+                            f"✅ {total_p - sem_obra_p} com obra vinculada"
+                            + (f" | ⚠️ {sem_obra_p} sem obra (obra_id NULL)"
+                               if sem_obra_p else ""))
+
+                    # ══ ROTA 7 — CUSTOS ═══════════════════════════════════════
+                    elif rota == "7":
+                        arquivo.seek(0)
+                        df7 = pd.read_csv(arquivo, sep=None, engine="python",
+                                          encoding="utf-8-sig", dtype=str, header=0)
+                        # Mapeamento flexível de colunas (vários formatos de ERP)
+                        rename7 = {}
+                        for c7 in df7.columns:
+                            cl7 = c7.lower().strip()
+                            if cl7 in ("obra","obra_codigo","cod_obra","codigo_obra"):
+                                rename7[c7] = "obra_codigo"
+                            elif cl7 in ("data","data_lancamento","dt_lancamento","data_doc"):
+                                rename7[c7] = "data"
+                            elif cl7 in ("id_lancamento","id","lancamento","id_lanc"):
+                                rename7[c7] = "id_lancamento"
+                            elif cl7 in ("numero_doc","num_doc","numero","ndoc","n_doc"):
+                                rename7[c7] = "numero_doc"
+                            elif cl7 in ("centro_custos","centro","cc","centro_de_custo"):
+                                rename7[c7] = "centro_custos"
+                            elif cl7 in ("conta_macro","macro","conta_gerencial_macro"):
+                                rename7[c7] = "conta_macro"
+                            elif cl7 in ("conta_gerencial","conta","gerencial"):
+                                rename7[c7] = "conta_gerencial"
+                            elif cl7 in ("cli_fornecedor","fornecedor","cliente","cli_forn",
+                                         "nome_fornecedor","nome_cliente"):
+                                rename7[c7] = "cli_fornecedor"
+                            elif cl7 in ("produto_servico","produto","servico","descricao",
+                                         "historico","desc"):
+                                rename7[c7] = "produto_servico"
+                            elif cl7 in ("criado_por","usuario","user","operador"):
+                                rename7[c7] = "criado_por"
+                            elif cl7 in ("valor_global","valor","total","vl_total","vl_global"):
+                                rename7[c7] = "valor_global"
+                            elif cl7 in ("qtd","quantidade","qtde","qty"):
+                                rename7[c7] = "qtd"
+                            elif cl7 in ("preco_unitario","preco","unit","vl_unit","valor_unit"):
+                                rename7[c7] = "preco_unitario"
+                            elif cl7 in ("origem","tipo_origem","fonte"):
+                                rename7[c7] = "origem"
+                            elif cl7 in ("chave_coligada","coligada","chave"):
+                                rename7[c7] = "chave_coligada"
+                            elif cl7 in ("cod_tipo_doc","tipo_doc","cod_tipo","tipo_documento"):
+                                rename7[c7] = "cod_tipo_doc"
+                        df7 = df7.rename(columns=rename7)
+                        if "obra_codigo" not in df7.columns:
+                            st.error("❌ Coluna de código de obra não encontrada. "
+                                     "Renomeie para 'obra_codigo' e tente novamente.")
+                            st.stop()
+                        mob7 = mapa_obras()
+                        df7["obra_id"] = aplicar_obra_id(
+                            df7["obra_codigo"].apply(extrair_codigo), mob7)
+                        df7 = df7.replace("", None).where(pd.notnull(df7), None)
+                        com_obra7 = int(df7["obra_id"].notna().sum())
+                        sem_obra7 = int(df7["obra_id"].isna().sum())
+                        for col7 in ["valor_global","qtd","preco_unitario"]:
+                            if col7 in df7.columns:
+                                df7[col7] = pd.to_numeric(df7[col7], errors="coerce")
+                                df7[col7] = df7[col7].where(pd.notnull(df7[col7]), None)
+                        cols_bd7 = ["obra_id","data","id_lancamento","numero_doc",
+                                    "centro_custos","conta_macro","conta_gerencial",
+                                    "cli_fornecedor","produto_servico","criado_por",
+                                    "valor_global","qtd","preco_unitario","origem",
+                                    "chave_coligada","cod_tipo_doc"]
+                        cols_bd7_ok = [c for c in cols_bd7 if c in df7.columns]
+                        pacote7_raw = df7[cols_bd7_ok].to_dict("records")
+                        pacote7 = []
+                        for row7 in pacote7_raw:
+                            pacote7.append({
+                                k: None if (
+                                    v is None
+                                    or (isinstance(v, float)
+                                        and (_math.isnan(v) or _math.isinf(v)))
+                                    or str(v).strip().lower()
+                                    in ("nan","nat","none","inf","")
+                                ) else v
+                                for k, v in row7.items()
+                            })
+                        total7 = enviar_lotes("custos", pacote7, "Enviando custos...")
+                        _inline_cache_clear()
+                        st.success(f"🎉 {total7} lançamentos importados!")
+                        st.info(f"✅ {com_obra7} diretos (com obra) | 🏭 {sem_obra7} indiretos")
+
+                except Exception as _e:
+                    st.error(f"❌ Erro: {_e}")
+                    st.code(_tb.format_exc(), language="python")
 
 # ==========================================================
 # EQUIPE
