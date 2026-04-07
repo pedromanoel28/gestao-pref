@@ -493,14 +493,15 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                                 "faturamento_direto", "custo_total", "despesas_indiretas",
                                 "impostos", "lucro", "cimento_cliente_ton", "cimento_civil_ton",
                                 "chave_coligada", "razao_social", "cnpj", "responsavel",
-                                "email", "volume_projeto", "concreto", "aco_estrutural",
-                                "formas", "mo_producao", "eps", "estuque", "projetos",
+                                "email", "_tipo_item", "_caminho",
+                                "volume_projeto", "concreto", "aco_estrutural", "formas",
+                                "mo_producao", "eps", "estuque", "projetos",
                                 "descida_agua", "insertos", "consoles", "investimentos",
-                                "neoprene", "materiais_consumo", "equip_fab",
-                                "custos_indiretos", "pecas_consorcio", "frete",
-                                "equip_montagem", "mo_montagem", "despesas_equipe",
-                                "topografia", "mobilizacao", "equip_aux_montagem",
-                                "outros", "eventuais", "despesas_comerciais",
+                                "materiais_consumo", "equip_fab", "custos_indiretos",
+                                "pecas_consorcio", "frete", "equip_montagem", "mo_montagem",
+                                "neoprene", "despesas_equipe", "topografia", "mobilizacao",
+                                "equip_aux_montagem", "outros", "eventuais", "despesas_comerciais",
+                                "_extra1", "_extra2", "_extra3",
                             ]
                             df12 = df12.rename(columns={
                                 df12.columns[i]: nomes12[i]
