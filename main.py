@@ -560,6 +560,8 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         df7 = df7.replace("", None).where(pd.notnull(df7), None)
                         com_obra7 = int(df7["obra_id"].notna().sum())
                         sem_obra7 = int(df7["obra_id"].isna().sum())
+                        if "data" in df7.columns:
+                            df7["data"] = formatar_data(df7["data"])
                         for col7 in ["valor_global","qtd","preco_unitario"]:
                             if col7 in df7.columns:
                                 df7[col7] = pd.to_numeric(df7[col7], errors="coerce")
