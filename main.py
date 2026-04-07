@@ -375,7 +375,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             pacote = df[cols_bd].to_dict("records")
                             pacote = fix_ids(pacote)
                             total = enviar_lotes(tabela, pacote, f"Enviando para {tabela}...",
-                                                 on_conflict="obra_id,codigo")
+                                                 on_conflict="codigo")
                             st.success(f"🎉 {total} registros atualizados em {tabela}!")
                             com_obra = total - sem_obra
                             st.info(f"✅ {com_obra} com obra vinculada"
@@ -395,7 +395,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                                        "centro_custos","conta_macro","conta_gerencial",
                                        "cli_fornecedor","produto_servico","criado_por",
                                        "valor_global","qtd","preco_unitario","origem",
-                                       "chave_coligada_id_origem","cod_tipo_doc_movimento"]
+                                       "chave_coligada","cod_tipo_doc"]
                             for col in ["valor_global","qtd","preco_unitario"]:
                                 df[col] = pd.to_numeric(df[col], errors="coerce")
                                 df[col] = df[col].where(pd.notnull(df[col]), None)
@@ -424,7 +424,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             # Renomear por posição — imune a acentos no cabeçalho
                             nomes11 = [
                                 "codigo_obra_original", "titulo", "etapa_obra",
-                                "data_acao", "nome_pagador", "cnpj_pagador",
+                                "data_emissao", "nome_pagador", "cnpj_pagador",
                                 "numero_nf", "numero_nf_remessa", "data_vencimento",
                                 "descricao", "valor", "cnpj_recebedor",
                                 "razao_social_recebedor", "tipo", "observacoes", "categoria",
@@ -441,7 +441,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             df11 = df11[~mask_cancel].copy()
 
                             # Converter datas DD/MM/YYYY → YYYY-MM-DD
-                            df11["data_acao"]       = formatar_data(df11["data_acao"])
+                            df11["data_emissao"]    = formatar_data(df11["data_emissao"])
                             df11["data_vencimento"] = formatar_data(df11["data_vencimento"])
 
                             # Limpar valor monetário → float ou None
@@ -462,9 +462,6 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                                 "cnpj_recebedor", "razao_social_recebedor",
                                 "tipo", "observacoes", "categoria",
                             ]
-                            # Renomeia data_acao → data_emissao para o banco
-                            if "data_acao" in df11.columns and "data_emissao" not in df11.columns:
-                                df11 = df11.rename(columns={"data_acao": "data_emissao"})
                             cols_bd11 = [c for c in cols_bd11 if c in df11.columns]
                             pacote11 = df11[cols_bd11].to_dict("records")
                             pacote11 = fix_ids(pacote11)
@@ -514,7 +511,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             cols_num12 = [c for c in nomes12
                                           if c not in texto12 and c in df12.columns]
                             cols_bd12 = [
-                                "obra_id", "data_contrato", "codigo_produto", "obra_nome",
+                                "cod4", "data_contrato", "codigo_produto", "obra_nome",
                                 "chave_coligada", "razao_social", "cnpj", "responsavel",
                                 "email", "volume", "volume_projeto", "faturamento_total",
                                 "faturamento_civil", "faturamento_direto", "custo_total",
@@ -584,7 +581,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                                     ).eq("id", obra_id).execute()
 
                                 # ── PASSO 3: montar payload obras_financeiro ──
-                                payload12 = {"obra_id": obra_id}
+                                payload12 = {"cod4": cod4}
                                 payload12["data_contrato"] = formatar_data_valor(
                                     row.get("data_contrato"))
                                 for campo in ["codigo_produto", "obra_nome", "chave_coligada",
@@ -599,10 +596,10 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                                 payload12 = {k: v for k, v in payload12.items()
                                              if k in cols_bd12}
 
-                                # ── PASSO 3: upsert obras_financeiro ──────────
+                                # ── PASSO 4: upsert obras_financeiro via cod4 ─
                                 resp_fin = (supabase.table("obras_financeiro")
-                                            .select("obra_id")
-                                            .eq("obra_id", obra_id)
+                                            .select("cod4")
+                                            .eq("cod4", cod4)
                                             .execute())
                                 if not resp_fin.data:
                                     supabase.table("obras_financeiro").insert(
@@ -610,7 +607,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                                     inseridas += 1
                                 else:
                                     supabase.table("obras_financeiro").update(
-                                        payload12).eq("obra_id", obra_id).execute()
+                                        payload12).eq("cod4", cod4).execute()
                                     atualizadas += 1
 
                             limpar_cache()
@@ -885,9 +882,13 @@ def volume_referencia(obra_id):
     """Retorna o volume de referência da obra para uso financeiro.
     Prioridade: volume_projeto > volume (comercial) > None."""
     try:
+        r = supabase.table("obras").select("cod4").eq("id", obra_id).limit(1).execute()
+        if not r.data: return None
+        cod4 = r.data[0].get("cod4")
+        if not cod4: return None
         resp = supabase.table("obras_financeiro")\
             .select("volume_projeto, volume")\
-            .eq("obra_id", obra_id)\
+            .eq("cod4", cod4)\
             .limit(1).execute()
         if not resp.data:
             return None
@@ -913,7 +914,7 @@ def carregar_obras_completo():
     df_o = pd.DataFrame(resp_o.data or [])
     if df_o.empty:
         return df_o
-    cols_fin = ("obra_id, faturamento_total, volume, volume_projeto, custo_total, lucro,"
+    cols_fin = ("cod4, faturamento_total, volume, volume_projeto, custo_total, lucro,"
                 " concreto, aco_estrutural, formas, mo_producao, materiais_consumo,"
                 " equip_fab, custos_indiretos, eps, estuque, insertos, consoles, neoprene,"
                 " descida_agua, pecas_consorcio, investimentos, frete, equip_montagem,"
@@ -922,8 +923,7 @@ def carregar_obras_completo():
     resp_f = supabase.table("obras_financeiro").select(cols_fin).execute()
     df_f   = pd.DataFrame(resp_f.data or [])
     if not df_f.empty:
-        df = df_o.merge(df_f, left_on="id", right_on="obra_id", how="left")
-        df = df.drop(columns=["obra_id"], errors="ignore")
+        df = df_o.merge(df_f, on="cod4", how="left")
     else:
         df = df_o.copy()
     num_cols = [
@@ -1941,17 +1941,25 @@ elif pagina_selecionada == "💰 Financeiro":
 
     @st.cache_data(ttl=300)
     def carregar_obras_financeiro():
-        resp = supabase.table("obras_financeiro")\
-            .select("*, obras(nome, status, modalidade, cliente)")\
-            .execute()
-        if not resp.data:
+        resp_of = supabase.table("obras_financeiro").select("*").execute()
+        if not resp_of.data:
             return pd.DataFrame()
-        df = pd.DataFrame(resp.data)
-        df["obra_nome"]   = df["obras"].apply(lambda x: (x or {}).get("nome"))
-        df["obra_status"] = df["obras"].apply(lambda x: (x or {}).get("status"))
-        df["modalidade"]  = df["obras"].apply(lambda x: (x or {}).get("modalidade"))
-        df["cliente"]     = df["obras"].apply(lambda x: (x or {}).get("cliente"))
-        df = df.drop(columns=["obras"])
+        resp_o = supabase.table("obras")\
+            .select("id, cod4, nome, status, modalidade, cliente").execute()
+        df_of = pd.DataFrame(resp_of.data)
+        df_o  = pd.DataFrame(resp_o.data or [])
+        if not df_o.empty and "cod4" in df_of.columns:
+            df = df_of.merge(df_o, on="cod4", how="left", suffixes=("", "_obras"))
+            df = df.rename(columns={
+                "id":        "obra_id",
+                "nome":      "obra_nome",
+                "status":    "obra_status",
+            })
+        else:
+            df = df_of.copy()
+            for col in ("obra_id", "obra_nome", "obra_status", "modalidade", "cliente"):
+                if col not in df.columns:
+                    df[col] = None
         for c in [
             "volume", "volume_projeto", "faturamento_total", "faturamento_civil",
             "faturamento_direto", "custo_total", "despesas_indiretas", "impostos",
@@ -3838,9 +3846,13 @@ elif pagina_selecionada == "🔍 Análise da Obra":
     @st.cache_data(ttl=300)
     def _fin_obra(obra_id):
         try:
+            r = supabase.table("obras").select("cod4").eq("id", obra_id).limit(1).execute()
+            if not r.data: return {}
+            cod4 = r.data[0].get("cod4")
+            if not cod4: return {}
             resp = supabase.table("obras_financeiro")\
                 .select("faturamento_total, volume, volume_projeto")\
-                .eq("obra_id", obra_id).limit(1).execute()
+                .eq("cod4", cod4).limit(1).execute()
             return resp.data[0] if resp.data else {}
         except Exception:
             return {}
