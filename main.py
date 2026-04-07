@@ -464,6 +464,9 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             "observacoes","categoria",
                         ]
                         cols_bd3 = [c for c in cols_bd3 if c in df3.columns]
+                        df3 = df3.drop_duplicates(
+                            subset=["numero_nf", "tipo"], keep="last"
+                        )
                         pacote3 = df3[cols_bd3].to_dict("records")
                         pacote3 = fix_ids(pacote3)
                         pacote3 = limpar_nan_pacote(pacote3)
