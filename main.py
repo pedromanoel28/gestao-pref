@@ -474,6 +474,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         cols_bd_p_ok = [c for c in cols_bd_p if c in df_p.columns]
                         pacote_p = df_p[cols_bd_p_ok].to_dict("records")
                         pacote_p = fix_ids(pacote_p)
+                        pacote_p = limpar_nan_pacote(pacote_p)
                         total_p = enviar_lotes(tabela_p, pacote_p,
                                                f"Enviando para {tabela_p}...",
                                                on_conflict="codigo")
