@@ -226,22 +226,34 @@ if pagina_selecionada == "📥 Importador de Arquivos":
         "5. Transporte          → exportação ERP expedição",
         "6. Montagem            → exportação ERP montagem",
         "7. Custos              → exportação ERP lançamentos",
+        "8. Folha / RH          → exportação XLSX mensal de folha de pagamento",
     ])
-    rota = opcao.strip()[0]          # "1" … "7"
+    rota = opcao.strip()[0]          # "1" … "8"
 
-    arquivo = st.file_uploader("Arraste o CSV aqui", type=["csv"])
+    arquivo = st.file_uploader("Arraste o arquivo aqui", type=["csv", "xlsx"])
 
     if arquivo:
         # ── leitura automática (sep ; ou ,) ───────────────────────────────────
-        try:
-            arquivo.seek(0)
-            df_prev = pd.read_csv(arquivo, sep=None, engine="python",
-                                  encoding="utf-8-sig", dtype=str, header=0)
-            with st.expander(f"👁️ Pré-visualização — {df_prev.shape[0]} linhas × {df_prev.shape[1]} colunas"):
-                st.dataframe(df_prev.head(10), use_container_width=True)
-        except Exception as e:
-            st.error(f"❌ Erro ao ler CSV: {e}")
-            st.stop()
+        if rota == "8":
+            # XLSX — pré-visualização via openpyxl
+            try:
+                arquivo.seek(0)
+                df_prev = pd.read_excel(arquivo, engine="openpyxl", dtype=str)
+                with st.expander(f"👁️ Pré-visualização — {df_prev.shape[0]} linhas × {df_prev.shape[1]} colunas"):
+                    st.dataframe(df_prev.head(10), use_container_width=True)
+            except Exception as e:
+                st.error(f"❌ Erro ao ler XLSX: {e}")
+                st.stop()
+        else:
+            try:
+                arquivo.seek(0)
+                df_prev = pd.read_csv(arquivo, sep=None, engine="python",
+                                      encoding="utf-8-sig", dtype=str, header=0)
+                with st.expander(f"👁️ Pré-visualização — {df_prev.shape[0]} linhas × {df_prev.shape[1]} colunas"):
+                    st.dataframe(df_prev.head(10), use_container_width=True)
+            except Exception as e:
+                st.error(f"❌ Erro ao ler CSV: {e}")
+                st.stop()
 
         # ── Correlação com Obras (rotas 4–7) ─────────────────────────────────
         if rota in ["4","5","6","7"]:
@@ -691,6 +703,124 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         st.success(f"🎉 {total7} lançamentos importados!")
                         st.info(f"✅ {com_obra7} diretos (com obra) | 🏭 {sem_obra7} indiretos")
 
+                    # ══ ROTA 8 — FOLHA / RH ═══════════════════════════════════
+                    elif rota == "8":
+                        # Pede o mês de competência antes de processar
+                        st.info("📅 Informe o mês de competência desta folha antes de importar.")
+                        mes_comp = st.date_input(
+                            "Mês de competência (selecione o dia 1 do mês)",
+                            value=None,
+                            key="folha_mes_comp",
+                            format="DD/MM/YYYY",
+                            help="Selecione o primeiro dia do mês referente a esta folha. Ex: 01/01/2025"
+                        )
+                        if not mes_comp:
+                            st.warning("⚠️ Selecione o mês de competência para continuar.")
+                            st.stop()
+
+                        # Lê o arquivo como xlsx
+                        try:
+                            arquivo.seek(0)
+                            df8 = pd.read_excel(arquivo, engine="openpyxl", dtype=str)
+                        except Exception as e:
+                            st.error(f"❌ Erro ao ler XLSX: {e}")
+                            st.stop()
+
+                        # Remove linhas completamente vazias ou sem nome
+                        df8 = df8.dropna(subset=["Nome do Colaborador"]).copy()
+                        df8 = df8[df8["Nome do Colaborador"].str.strip() != ""].copy()
+
+                        # Mapeamento de colunas xlsx → banco
+                        col_map8 = {
+                            "Nome do Colaborador":        "nome_colaborador",
+                            "Função":                     "funcao",
+                            "CPF":                        "cpf",
+                            "Situação":                   "situacao",
+                            "Proventos":                  "proventos",
+                            "Base FGTS + Base FGTS 13º": "base_fgts",
+                            "Base INSS + Base INSS 13º":  "base_inss",
+                            "h.e 50%":                    "he_50",
+                            "h.e 70%":                    "he_70",
+                            "h.e 80%":                    "he_80",
+                            "h.e 100%":                   "he_100",
+                            "h.e 110%":                   "he_110",
+                            "h.e 150%":                   "he_150",
+                            "Adc. Noturno":               "adc_noturno",
+                            "D.S.R.":                     "dsr",
+                            "Desconto Compart":           "desconto_compart",
+                            "Vale Transporte":            "vale_transporte",
+                            "Alimentação":                "alimentacao",
+                            "Seguro de vida":             "seguro_vida",
+                            "Assistencia Médica":         "assistencia_medica",
+                            "Soma HEs + D.S.R":           "soma_hes",
+                            "Proventos 13º":              "proventos_13",
+                            "Base FGTS 13":               "base_fgts_13",
+                            "Desc. 1ª 13º":               "desc_1_13",
+                            "FGTS ARTIGO 22":             "fgts_art22",
+                            "Valor do Funcionário":       "valor_funcionario",
+                            "Coligada":                   "empresa",
+                        }
+                        df8 = df8.rename(columns=col_map8)
+
+                        # Colunas numéricas
+                        cols_num8 = [
+                            "proventos", "base_fgts", "base_inss",
+                            "he_50", "he_70", "he_80", "he_100", "he_110", "he_150",
+                            "adc_noturno", "dsr", "desconto_compart", "vale_transporte",
+                            "alimentacao", "seguro_vida", "assistencia_medica", "soma_hes",
+                            "proventos_13", "base_fgts_13", "desc_1_13", "fgts_art22",
+                            "valor_funcionario"
+                        ]
+                        for c in cols_num8:
+                            if c in df8.columns:
+                                df8[c] = pd.to_numeric(df8[c], errors="coerce")
+                                df8[c] = df8[c].apply(
+                                    lambda v: None if (v is None or (isinstance(v, float) and (_math.isnan(v) or _math.isinf(v)))) else v
+                                )
+
+                        # Colunas de texto
+                        for c in ["nome_colaborador", "funcao", "cpf", "situacao", "empresa"]:
+                            if c in df8.columns:
+                                df8[c] = df8[c].apply(
+                                    lambda v: None if (v is None or str(v).strip().lower() in ("nan", "none", "")) else str(v).strip()
+                                )
+
+                        # Adiciona mês de competência
+                        df8["mes"] = mes_comp.isoformat()
+
+                        # Monta pacote final com apenas colunas existentes no banco
+                        cols_bd8 = [
+                            "nome_colaborador", "funcao", "cpf", "situacao", "mes", "empresa",
+                            "proventos", "base_fgts", "base_inss",
+                            "he_50", "he_70", "he_80", "he_100", "he_110", "he_150",
+                            "adc_noturno", "dsr", "desconto_compart", "vale_transporte",
+                            "alimentacao", "seguro_vida", "assistencia_medica", "soma_hes",
+                            "proventos_13", "base_fgts_13", "desc_1_13", "fgts_art22",
+                            "valor_funcionario"
+                        ]
+                        cols_bd8_ok = [c for c in cols_bd8 if c in df8.columns]
+                        pacote8 = df8[cols_bd8_ok].to_dict("records")
+
+                        # Limpa NaN residuais
+                        pacote8_limpo = []
+                        for row8 in pacote8:
+                            pacote8_limpo.append({
+                                k: None if (
+                                    v is None
+                                    or (isinstance(v, float) and (_math.isnan(v) or _math.isinf(v)))
+                                    or str(v).strip().lower() in ("nan", "nat", "none", "inf", "")
+                                ) else v
+                                for k, v in row8.items()
+                            })
+
+                        total8 = enviar_lotes("folha", pacote8_limpo, "Enviando folha...")
+                        _inline_cache_clear()
+                        st.success(f"🎉 {total8} colaboradores importados para o mês {mes_comp.strftime('%m/%Y')}!")
+                        ativos8  = sum(1 for r in pacote8_limpo if r.get("situacao") == "A")
+                        demit8   = sum(1 for r in pacote8_limpo if r.get("situacao") == "D")
+                        ferias8  = sum(1 for r in pacote8_limpo if r.get("situacao") == "F")
+                        st.info(f"✅ {ativos8} ativos | 🏖️ {ferias8} férias | 🚪 {demit8} desligados")
+
                 except Exception as _e:
                     st.error(f"❌ Erro: {_e}")
                     st.code(_tb.format_exc(), language="python")
@@ -893,6 +1023,12 @@ def limpar_cache():
     try: _medicoes_obra.clear()
     except: pass
     try: _fin_obra.clear()
+    except: pass
+    try: carregar_folha_meses.clear()
+    except: pass
+    try: carregar_folha_mes.clear()
+    except: pass
+    try: carregar_folha_historico.clear()
     except: pass
 
 # ── PAINEL LATERAL — EDIÇÃO RÁPIDA DE OBRA ──────────────
@@ -4516,3 +4652,416 @@ elif pagina_selecionada == "✏️ Editar Obras":
 
 Para cruzar **custos** com obras nos dashboards: `SUBSTRING(centro_custos, 1, 4)` = `obras.cod4`.
             """)
+
+# ==========================================================
+# FOLHA / RH
+# ==========================================================
+elif pagina_selecionada == "👷 Folha / RH":
+    import plotly.graph_objects as go
+    import plotly.express as px
+
+    st.header("👷 Folha / RH")
+
+    # ── FUNÇÕES DE CARGA ──────────────────────────────────────────────────────
+
+    @st.cache_data(ttl=300)
+    def carregar_folha_meses():
+        resp = supabase.table("folha").select("mes").execute()
+        if not resp.data:
+            return []
+        meses = sorted(set(r["mes"][:7] for r in resp.data if r.get("mes")), reverse=True)
+        return meses
+
+    @st.cache_data(ttl=300)
+    def carregar_folha_mes(mes_iso):
+        rows, page, size = [], 0, 1000
+        q = (supabase.table("folha").select("*")
+             .gte("mes", mes_iso + "-01")
+             .lte("mes", mes_iso + "-31"))
+        while True:
+            resp = q.range(page * size, (page + 1) * size - 1).execute()
+            rows.extend(resp.data)
+            if len(resp.data) < size:
+                break
+            page += 1
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        cols_num = [
+            "proventos", "base_fgts", "base_inss", "he_50", "he_70", "he_80",
+            "he_100", "he_110", "he_150", "adc_noturno", "dsr", "desconto_compart",
+            "vale_transporte", "alimentacao", "seguro_vida", "assistencia_medica",
+            "soma_hes", "proventos_13", "base_fgts_13", "desc_1_13",
+            "fgts_art22", "valor_funcionario"
+        ]
+        for c in cols_num:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        return df
+
+    @st.cache_data(ttl=300)
+    def carregar_folha_historico():
+        rows, page, size = [], 0, 1000
+        q = supabase.table("folha").select(
+            "mes, situacao, proventos, valor_funcionario, soma_hes, "
+            "vale_transporte, alimentacao, seguro_vida, assistencia_medica"
+        )
+        while True:
+            resp = q.range(page * size, (page + 1) * size - 1).execute()
+            rows.extend(resp.data)
+            if len(resp.data) < size:
+                break
+            page += 1
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        for c in ["proventos", "valor_funcionario", "soma_hes",
+                  "vale_transporte", "alimentacao", "seguro_vida", "assistencia_medica"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+        df["mes_ref"] = df["mes"].apply(lambda v: str(v)[:7] if v else None)
+        return df
+
+    # ── CARREGA MESES DISPONÍVEIS ─────────────────────────────────────────────
+    meses_disp = carregar_folha_meses()
+
+    if not meses_disp:
+        st.warning("Nenhuma folha importada ainda. Use o **📥 Importador de Arquivos** → Rota 8 para importar.")
+        st.stop()
+
+    # ── FILTROS GLOBAIS ───────────────────────────────────────────────────────
+    fh1, fh2, fh3 = st.columns([2, 2, 1])
+
+    mes_labels = {m: m[5:7] + "/" + m[:4] for m in meses_disp}
+    mes_sel = fh1.selectbox(
+        "Mês de referência",
+        options=meses_disp,
+        format_func=lambda m: mes_labels[m],
+        key="folha_mes_sel",
+        label_visibility="collapsed"
+    )
+
+    sit_opcoes = ["Ativos (A)", "Férias (F)", "Demitidos (D)", "Todos"]
+    sit_sel = fh2.selectbox("Situação", sit_opcoes, key="folha_sit_sel", label_visibility="collapsed")
+
+    if fh3.button("🔄 Atualizar", key="btn_folha_refresh"):
+        carregar_folha_meses.clear()
+        carregar_folha_mes.clear()
+        carregar_folha_historico.clear()
+        st.rerun()
+
+    # ── CARREGA DADOS DO MÊS ─────────────────────────────────────────────────
+    with st.spinner("Carregando folha..."):
+        df_folha = carregar_folha_mes(mes_sel)
+
+    if df_folha.empty:
+        st.warning("Sem dados para este mês.")
+        st.stop()
+
+    # Aplica filtro de situação
+    sit_map = {"Ativos (A)": "A", "Férias (F)": "F", "Demitidos (D)": "D"}
+    if sit_sel != "Todos":
+        df_f = df_folha[df_folha["situacao"] == sit_map[sit_sel]].copy()
+    else:
+        df_f = df_folha.copy()
+
+    # ── CARDS KPI ────────────────────────────────────────────────────────────
+    ativos_n    = len(df_folha[df_folha["situacao"] == "A"])
+    ferias_n    = len(df_folha[df_folha["situacao"] == "F"])
+    demit_n     = len(df_folha[df_folha["situacao"] == "D"])
+    folha_total = df_folha[df_folha["situacao"].isin(["A", "F"])]["valor_funcionario"].sum()
+    prov_total  = df_folha[df_folha["situacao"].isin(["A", "F"])]["proventos"].sum()
+    he_total    = df_folha[df_folha["situacao"].isin(["A", "F"])]["soma_hes"].fillna(0).sum()
+    custo_medio = folha_total / max(ativos_n + ferias_n, 1)
+    pct_he      = (he_total / prov_total * 100) if prov_total > 0 else 0.0
+    encargos_tot = folha_total - prov_total
+
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("👥 Colaboradores", f"{ativos_n + ferias_n}", f"🚪 {demit_n} desligado(s)")
+    k2.metric("🏖️ Em Férias", str(ferias_n))
+    k3.metric("💰 Folha Total", fmt_brl(folha_total),
+              help="Soma de Valor do Funcionário (Ativos + Férias)")
+    k4.metric("📊 Custo Médio", fmt_brl(custo_medio))
+    k5.metric("⏱️ Horas Extras", fmt_brl(he_total),
+              delta=f"{pct_he:.1f}% dos proventos", delta_color="inverse")
+    k6.metric("📎 Encargos", fmt_brl(encargos_tot),
+              help="Folha Total − Proventos brutos")
+
+    st.divider()
+
+    # ── ABAS ─────────────────────────────────────────────────────────────────
+    tab_vis, tab_evo, tab_det = st.tabs(["📊 Visão do Mês", "📈 Evolução Mensal", "📋 Detalhamento"])
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ABA 1 — VISÃO DO MÊS
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_vis:
+        col_esq, col_dir = st.columns(2)
+
+        with col_esq:
+            st.markdown("#### 👷 Headcount por Função")
+            df_func = (
+                df_f[df_f["situacao"].isin(["A", "F"])]
+                .groupby("funcao")
+                .size()
+                .reset_index(name="qtd")
+                .sort_values("qtd", ascending=True)
+                .tail(15)
+            )
+            if not df_func.empty:
+                fig_func = go.Figure(go.Bar(
+                    x=df_func["qtd"],
+                    y=df_func["funcao"],
+                    orientation="h",
+                    marker_color="#1976D2",
+                    hovertemplate="%{y}<br>%{x} colaboradores<extra></extra>"
+                ))
+                fig_func.update_layout(
+                    xaxis=dict(title="Colaboradores"),
+                    yaxis=dict(autorange="reversed"),
+                    margin=dict(t=10, b=10, r=10),
+                    height=420
+                )
+                st.plotly_chart(fig_func, use_container_width=True, key="chart_func")
+            else:
+                st.info("Sem dados para o filtro selecionado.")
+
+        with col_dir:
+            st.markdown("#### 💰 Composição do Custo Total")
+            df_comp = df_folha[df_folha["situacao"].isin(["A", "F"])]
+            vt_tot   = df_comp["vale_transporte"].sum()
+            ali_tot  = df_comp["alimentacao"].sum()
+            seg_tot  = df_comp["seguro_vida"].sum()
+            med_tot  = df_comp["assistencia_medica"].sum()
+            he_comp  = df_comp["soma_hes"].fillna(0).sum()
+            sal_base = df_comp["proventos"].sum() - he_comp
+            enc_comp = folha_total - prov_total
+
+            labels_c = ["Salário Base", "Horas Extras", "Encargos", "VT", "Alimentação", "Saúde/Seguro"]
+            values_c = [sal_base, he_comp, enc_comp, vt_tot, ali_tot, seg_tot + med_tot]
+            cores_c  = ["#1976D2", "#E53935", "#FB8C00", "#43A047", "#8E24AA", "#00ACC1"]
+            pairs = [(l, v, c) for l, v, c in zip(labels_c, values_c, cores_c) if v > 0]
+            if pairs:
+                fig_comp = go.Figure(go.Pie(
+                    labels=[p[0] for p in pairs],
+                    values=[p[1] for p in pairs],
+                    hole=0.42,
+                    marker_colors=[p[2] for p in pairs],
+                    textinfo="label+percent",
+                    hovertemplate="%{label}<br>R$ %{value:,.0f}<br>%{percent}<extra></extra>"
+                ))
+                fig_comp.update_layout(
+                    showlegend=False,
+                    margin=dict(t=10, b=10, l=10, r=10),
+                    height=420
+                )
+                st.plotly_chart(fig_comp, use_container_width=True, key="chart_comp")
+
+        st.divider()
+
+        st.markdown("#### 📋 Custo por Função")
+        df_custo_func = (
+            df_folha[df_folha["situacao"].isin(["A", "F"])]
+            .groupby("funcao")
+            .agg(
+                headcount=("nome_colaborador", "count"),
+                proventos=("proventos", "sum"),
+                he=("soma_hes", "sum"),
+                custo_total=("valor_funcionario", "sum"),
+            )
+            .reset_index()
+            .sort_values("custo_total", ascending=False)
+        )
+        df_custo_func["custo_medio"] = df_custo_func["custo_total"] / df_custo_func["headcount"]
+        df_custo_func["pct_folha"]   = df_custo_func["custo_total"] / folha_total * 100
+
+        st.dataframe(
+            df_custo_func.rename(columns={
+                "funcao":      "Função",
+                "headcount":   "Qtd",
+                "proventos":   "Proventos (R$)",
+                "he":          "HE (R$)",
+                "custo_total": "Custo Total (R$)",
+                "custo_medio": "Custo Médio (R$)",
+                "pct_folha":   "% Folha",
+            }),
+            use_container_width=True,
+            hide_index=True,
+            height=min(500, 36 + 35 * len(df_custo_func)),
+            column_config={
+                "Proventos (R$)":   st.column_config.NumberColumn(format="R$ %.0f"),
+                "HE (R$)":          st.column_config.NumberColumn(format="R$ %.0f"),
+                "Custo Total (R$)": st.column_config.NumberColumn(format="R$ %.0f"),
+                "Custo Médio (R$)": st.column_config.NumberColumn(format="R$ %.0f"),
+                "% Folha":          st.column_config.ProgressColumn(
+                                        "% Folha", min_value=0, max_value=100, format="%.1f%%"),
+            }
+        )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ABA 2 — EVOLUÇÃO MENSAL
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_evo:
+        with st.spinner("Carregando histórico..."):
+            df_hist = carregar_folha_historico()
+
+        if df_hist.empty:
+            st.info("Sem histórico disponível.")
+        else:
+            df_hist_at = df_hist[df_hist["situacao"].isin(["A", "F"])].copy()
+            evo = (
+                df_hist_at.groupby("mes_ref")
+                .agg(
+                    headcount=("valor_funcionario", "count"),
+                    folha=("valor_funcionario", "sum"),
+                    proventos=("proventos", "sum"),
+                    he=("soma_hes", "sum"),
+                )
+                .reset_index()
+                .sort_values("mes_ref")
+            )
+            evo["custo_medio"] = evo["folha"] / evo["headcount"]
+            evo["pct_he"]      = evo["he"] / evo["proventos"] * 100
+
+            st.markdown("#### 📈 Evolução da Folha Total e Headcount")
+            fig_evo = go.Figure()
+            fig_evo.add_trace(go.Bar(
+                x=evo["mes_ref"], y=evo["folha"],
+                name="Folha Total",
+                marker_color="#1976D2",
+                hovertemplate="<b>%{x}</b><br>R$ %{y:,.0f}<extra></extra>"
+            ))
+            fig_evo.add_trace(go.Scatter(
+                x=evo["mes_ref"], y=evo["headcount"],
+                name="Headcount",
+                yaxis="y2",
+                mode="lines+markers",
+                line=dict(color="#E53935", width=2),
+                hovertemplate="Headcount: %{y}<extra></extra>"
+            ))
+            fig_evo.update_layout(
+                yaxis=dict(title="R$", tickformat=",.0f"),
+                yaxis2=dict(title="Colaboradores", overlaying="y", side="right", showgrid=False),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                margin=dict(t=50, b=20),
+                height=320,
+                hovermode="x unified"
+            )
+            st.plotly_chart(fig_evo, use_container_width=True, key="chart_evo_folha")
+
+            st.divider()
+
+            st.markdown("#### ⏱️ Evolução das Horas Extras (% dos Proventos)")
+            fig_he = go.Figure()
+            fig_he.add_trace(go.Bar(
+                x=evo["mes_ref"], y=evo["he"],
+                name="HE (R$)",
+                marker_color="#FB8C00",
+                hovertemplate="<b>%{x}</b><br>R$ %{y:,.0f}<extra></extra>"
+            ))
+            fig_he.add_trace(go.Scatter(
+                x=evo["mes_ref"], y=evo["pct_he"],
+                name="% sobre Proventos",
+                yaxis="y2",
+                mode="lines+markers",
+                line=dict(color="#E53935", width=2, dash="dot"),
+                hovertemplate="%{y:.1f}%<extra></extra>"
+            ))
+            fig_he.update_layout(
+                yaxis=dict(title="R$", tickformat=",.0f"),
+                yaxis2=dict(title="%", overlaying="y", side="right",
+                            showgrid=False, ticksuffix="%"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                margin=dict(t=50, b=20),
+                height=300,
+                hovermode="x unified"
+            )
+            st.plotly_chart(fig_he, use_container_width=True, key="chart_he_evo")
+
+            st.divider()
+
+            st.markdown("#### 📋 Tabela Resumo Mensal")
+            evo_show = evo.copy()
+            evo_show["Folha"]       = evo_show["folha"].apply(fmt_brl)
+            evo_show["HE"]          = evo_show["he"].apply(fmt_brl)
+            evo_show["Custo Médio"] = evo_show["custo_medio"].apply(fmt_brl)
+            evo_show["% HE"]        = evo_show["pct_he"].apply(lambda v: f"{v:.1f}%")
+            st.dataframe(
+                evo_show[["mes_ref", "headcount", "Folha", "HE", "% HE", "Custo Médio"]]
+                    .rename(columns={"mes_ref": "Mês", "headcount": "Headcount"})
+                    .sort_values("Mês", ascending=False),
+                use_container_width=True,
+                hide_index=True
+            )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ABA 3 — DETALHAMENTO INDIVIDUAL
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_det:
+        st.markdown(f"#### 📋 Colaboradores — {mes_labels[mes_sel]}")
+
+        fd1, fd2 = st.columns(2)
+        funcoes_disp = sorted(df_f["funcao"].dropna().unique())
+        filtro_func = fd1.selectbox(
+            "Filtrar por função", ["Todas"] + funcoes_disp,
+            key="folha_det_func", label_visibility="collapsed"
+        )
+        texto_busca = fd2.text_input(
+            "Buscar nome", placeholder="Digite parte do nome...",
+            key="folha_busca", label_visibility="collapsed"
+        )
+
+        df_det = df_f.copy()
+        if filtro_func != "Todas":
+            df_det = df_det[df_det["funcao"] == filtro_func]
+        if texto_busca:
+            df_det = df_det[
+                df_det["nome_colaborador"].str.upper().str.contains(
+                    texto_busca.upper(), na=False
+                )
+            ]
+
+        colunas_det = [
+            "nome_colaborador", "funcao", "situacao",
+            "proventos", "soma_hes", "vale_transporte",
+            "alimentacao", "seguro_vida", "assistencia_medica",
+            "valor_funcionario"
+        ]
+        colunas_det_ok = [c for c in colunas_det if c in df_det.columns]
+        df_det_show = df_det[colunas_det_ok].sort_values("valor_funcionario", ascending=False)
+
+        st.caption(f"**{len(df_det_show)}** colaborador(es) · ordenado por custo total")
+        st.dataframe(
+            df_det_show.rename(columns={
+                "nome_colaborador":  "Nome",
+                "funcao":            "Função",
+                "situacao":          "Sit.",
+                "proventos":         "Proventos (R$)",
+                "soma_hes":          "HE (R$)",
+                "vale_transporte":   "VT (R$)",
+                "alimentacao":       "Alim. (R$)",
+                "seguro_vida":       "Seguro (R$)",
+                "assistencia_medica":"Saúde (R$)",
+                "valor_funcionario": "Custo Total (R$)",
+            }),
+            use_container_width=True,
+            hide_index=True,
+            height=min(600, 36 + 35 * len(df_det_show)),
+            column_config={
+                "Proventos (R$)":    st.column_config.NumberColumn(format="R$ %.2f"),
+                "HE (R$)":           st.column_config.NumberColumn(format="R$ %.2f"),
+                "VT (R$)":           st.column_config.NumberColumn(format="R$ %.2f"),
+                "Alim. (R$)":        st.column_config.NumberColumn(format="R$ %.2f"),
+                "Seguro (R$)":       st.column_config.NumberColumn(format="R$ %.2f"),
+                "Saúde (R$)":        st.column_config.NumberColumn(format="R$ %.2f"),
+                "Custo Total (R$)":  st.column_config.NumberColumn(format="R$ %.2f"),
+            }
+        )
+
+        if len(df_det_show) > 0:
+            st.caption(
+                f"**Totais do filtro** → "
+                f"Proventos: {fmt_brl(df_det_show['proventos'].sum())} | "
+                f"HE: {fmt_brl(df_det_show['soma_hes'].sum())} | "
+                f"Custo Total: {fmt_brl(df_det_show['valor_funcionario'].sum())}"
+            )
