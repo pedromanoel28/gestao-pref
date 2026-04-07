@@ -25,7 +25,7 @@ st.sidebar.caption("OBRAS & MEDIÇÕES")
 st.sidebar.divider()
 
 pagina_selecionada = st.sidebar.radio("Menu Principal", [
-    "--- 📊 DASHBOARDS ---", "🏭 Produção", "💰 Financeiro", "👷 Folha / RH",
+    "--- 📊 DASHBOARDS ---", "🏭 Produção", "💰 Financeiro", "🔍 Análise da Obra", "👷 Folha / RH",
     "--- 🛠️ GESTÃO ---", "🏗️ Gestão de Obras", "🛤️ Jornada da Obra", "👥 Equipe", 
     "📋 Gestão à Vista", "👤 Reunião 1:1",
     "--- 🗄️ BASE DE DADOS ---", "📥 Importador de Arquivos"
@@ -809,6 +809,20 @@ def limpar_cache():
     try: carregar_custos_resumo.clear()
     except: pass
     try: carregar_tarefas_extras.clear()
+    except: pass
+    try: _jornada_analise.clear()
+    except: pass
+    try: _marcos_analise.clear()
+    except: pass
+    try: _fab_obra.clear()
+    except: pass
+    try: _exp_obra.clear()
+    except: pass
+    try: _mont_obra.clear()
+    except: pass
+    try: _medicoes_obra.clear()
+    except: pass
+    try: _fin_obra.clear()
     except: pass
 
 # ── PAINEL LATERAL — EDIÇÃO RÁPIDA DE OBRA ──────────────
@@ -3722,3 +3736,453 @@ elif pagina_selecionada == "🛤️ Jornada da Obra":
             
             st.plotly_chart(fig_gantt, use_container_width=True)
             st.caption("Cinza: Planejado | Verde: Executado dentro do prazo | Vermelho: Atrasado")
+
+# ==========================================================
+# PÁGINA: ANÁLISE DA OBRA (DASHBOARD INTEGRADO)
+# ==========================================================
+elif pagina_selecionada == "🔍 Análise da Obra":
+    import pandas as pd
+    import plotly.express as px
+    from datetime import date
+
+    st.header("🔍 Análise da Obra")
+
+    # ── CACHE FUNCTIONS ──────────────────────────────────────
+    @st.cache_data(ttl=60)
+    def _jornada_analise(obra_id):
+        resp = supabase.table("obra_jornada")\
+            .select("*, template:jornada_template(*)")\
+            .eq("obra_id", obra_id).execute()
+        return sorted(resp.data, key=lambda x: x["template"]["ordem"]) if resp.data else []
+
+    @st.cache_data(ttl=60)
+    def _marcos_analise(obra_id):
+        resp = supabase.table("obra_marcos").select("*").eq("obra_id", obra_id).execute()
+        return resp.data[0] if resp.data else {}
+
+    @st.cache_data(ttl=300)
+    def _fab_obra(obra_id):
+        rows, page, size = [], 0, 1000
+        q = supabase.table("producao_fabricacao")\
+            .select("peca, produto, volume_teorico, data_fabricacao")\
+            .eq("obra_id", obra_id)
+        while True:
+            resp = q.range(page * size, (page + 1) * size - 1).execute()
+            rows.extend(resp.data)
+            if len(resp.data) < size: break
+            page += 1
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df["volume_teorico"] = pd.to_numeric(df["volume_teorico"], errors="coerce").fillna(0)
+            df["data_fabricacao"] = pd.to_datetime(df["data_fabricacao"], errors="coerce")
+        return df
+
+    @st.cache_data(ttl=300)
+    def _exp_obra(obra_id):
+        rows, page, size = [], 0, 1000
+        q = supabase.table("producao_transporte")\
+            .select("produto, volume_real, data_expedicao")\
+            .eq("obra_id", obra_id)
+        while True:
+            resp = q.range(page * size, (page + 1) * size - 1).execute()
+            rows.extend(resp.data)
+            if len(resp.data) < size: break
+            page += 1
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df["volume_real"] = pd.to_numeric(df["volume_real"], errors="coerce").fillna(0)
+            df["data_expedicao"] = pd.to_datetime(df["data_expedicao"], errors="coerce")
+        return df
+
+    @st.cache_data(ttl=300)
+    def _mont_obra(obra_id):
+        rows, page, size = [], 0, 1000
+        q = supabase.table("producao_montagem")\
+            .select("produto, volume_teorico, data_montagem")\
+            .eq("obra_id", obra_id)
+        while True:
+            resp = q.range(page * size, (page + 1) * size - 1).execute()
+            rows.extend(resp.data)
+            if len(resp.data) < size: break
+            page += 1
+        df = pd.DataFrame(rows)
+        if not df.empty:
+            df["volume_teorico"] = pd.to_numeric(df["volume_teorico"], errors="coerce").fillna(0)
+            df["data_montagem"] = pd.to_datetime(df["data_montagem"], errors="coerce")
+        return df
+
+    @st.cache_data(ttl=300)
+    def _medicoes_obra(obra_id):
+        try:
+            rows, page, size = [], 0, 1000
+            q = supabase.table("medicoes")\
+                .select("numero_nf, tipo, valor, data_emissao")\
+                .eq("obra_id", obra_id)
+            while True:
+                resp = q.range(page * size, (page + 1) * size - 1).execute()
+                rows.extend(resp.data)
+                if len(resp.data) < size: break
+                page += 1
+            df = pd.DataFrame(rows)
+            if df.empty: return df
+            df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
+            df["data_emissao"] = pd.to_datetime(df["data_emissao"], errors="coerce")
+            return df
+        except Exception:
+            return pd.DataFrame()
+
+    @st.cache_data(ttl=300)
+    def _fin_obra(obra_id):
+        try:
+            resp = supabase.table("obras_financeiro")\
+                .select("faturamento_total, volume, volume_projeto")\
+                .eq("obra_id", obra_id).limit(1).execute()
+            return resp.data[0] if resp.data else {}
+        except Exception:
+            return {}
+
+    # ── HELPERS ──────────────────────────────────────────────
+    _MAP_ST_AN = {
+        "nao_iniciado": ("⬜", "Não iniciado"),
+        "em_andamento": ("🔵", "Em andamento"),
+        "concluido":    ("✅", "Concluído"),
+        "impedido":     ("🔴", "Impedido"),
+    }
+
+    def _derivar_etapa(itens):
+        sl = [i["status"] for i in itens if i.get("aplicavel", True)]
+        if not sl: return "⬜", "N/A"
+        if "impedido" in sl: return "🔴", "Impedida"
+        if all(s == "concluido" for s in sl): return "✅", "Concluída"
+        if all(s == "nao_iniciado" for s in sl): return "⬜", "Não iniciada"
+        return "🔵", "Em andamento"
+
+    def _safe_date(d):
+        if not d: return None
+        try: return date.fromisoformat(str(d)[:10])
+        except: return None
+
+    def _barra_html(pct, cor="#1976D2"):
+        pct = min(max(float(pct or 0), 0), 100)
+        return (f"<div style='background:#e0e0e0;border-radius:4px;height:6px;width:100%;'>"
+                f"<div style='background:{cor};width:{pct:.1f}%;height:6px;border-radius:4px;'></div></div>")
+
+    # ── NÍVEL 1: SELETOR ─────────────────────────────────────
+    obras_an = carregar_obras_ativas()
+    if not obras_an:
+        st.warning("Nenhuma obra cadastrada."); st.stop()
+
+    c_sel, c_btn = st.columns([5, 1])
+    obras_map_an = {f"{o['cod4']} — {o['nome']}": o for o in obras_an}
+    obra_lbl_an  = c_sel.selectbox("Selecione a Obra", list(obras_map_an.keys()),
+                                   label_visibility="collapsed", key="analise_obra_sel")
+    obra_an      = obras_map_an[obra_lbl_an]
+    oid_an       = int(obra_an["id"])
+
+    if c_btn.button("🔄 Atualizar", use_container_width=True, key="analise_refresh"):
+        _jornada_analise.clear(); _marcos_analise.clear()
+        _fab_obra.clear(); _exp_obra.clear(); _mont_obra.clear()
+        _medicoes_obra.clear(); _fin_obra.clear()
+        st.rerun()
+
+    # ── CARREGA TUDO ─────────────────────────────────────────
+    jornada_an = _jornada_analise(oid_an)
+    marcos_an  = _marcos_analise(oid_an)
+    df_fab_an  = _fab_obra(oid_an)
+    df_exp_an  = _exp_obra(oid_an)
+    df_mont_an = _mont_obra(oid_an)
+    df_med_an  = _medicoes_obra(oid_an)
+    fin_an     = _fin_obra(oid_an)
+
+    # ── CÁLCULO DE VOLUMES ───────────────────────────────────
+    vol_proj_an = float(fin_an.get("volume_projeto") or fin_an.get("volume") or 0)
+    vol_fab_an  = df_fab_an["volume_teorico"].sum()  if not df_fab_an.empty  else 0.0
+    vol_exp_an  = df_exp_an["volume_real"].sum()     if not df_exp_an.empty  else 0.0
+    vol_mont_an = df_mont_an["volume_teorico"].sum() if not df_mont_an.empty else 0.0
+
+    fat_total_an = float(fin_an.get("faturamento_total") or 0)
+    fat_real_an  = df_med_an["valor"].sum() if not df_med_an.empty else 0.0
+    saldo_an     = fat_total_an - fat_real_an
+
+    pct_fab_an  = (vol_fab_an  / vol_proj_an * 100) if vol_proj_an else 0.0
+    pct_exp_an  = (vol_exp_an  / vol_proj_an * 100) if vol_proj_an else 0.0
+    pct_mont_an = (vol_mont_an / vol_proj_an * 100) if vol_proj_an else 0.0
+    pct_fat_an  = (fat_real_an / fat_total_an * 100) if fat_total_an else 0.0
+
+    # ── CÁLCULO DA JORNADA ───────────────────────────────────
+    etapas_an = {}
+    total_ap_an = total_conc_an = imped_an = 0
+    for item in jornada_an:
+        if not item.get("aplicavel", True): continue
+        total_ap_an += 1
+        if item["status"] == "concluido":    total_conc_an += 1
+        if item["status"] == "impedido":     imped_an += 1
+        ne = item["template"]["etapa_nome"]
+        etapas_an.setdefault(ne, []).append(item)
+    pct_jornada_an = (total_conc_an / total_ap_an * 100) if total_ap_an else 0.0
+
+    # ── PRAZO ────────────────────────────────────────────────
+    entrega_pact_an = _safe_date(marcos_an.get("entrega_pact"))
+    hoje_an = date.today()
+    delta_prazo_an  = (entrega_pact_an - hoje_an).days if entrega_pact_an else None
+
+    # ── BADGE DE SAÚDE ───────────────────────────────────────
+    gap_an = abs(pct_fab_an - pct_fat_an)
+    critico_an = (
+        (delta_prazo_an is not None and delta_prazo_an < -15) or
+        imped_an >= 2 or
+        gap_an > 20
+    )
+    atencao_an = (
+        (delta_prazo_an is not None and -15 <= delta_prazo_an < 0) or
+        imped_an == 1
+    )
+    if critico_an:
+        badge_cor_an, badge_txt_an = "🔴", "CRÍTICO"
+    elif atencao_an:
+        badge_cor_an, badge_txt_an = "🟡", "ATENÇÃO"
+    else:
+        badge_cor_an, badge_txt_an = "🟢", "SAUDÁVEL"
+
+    # ════════════════════════════════════════════════════════
+    # NÍVEL 1 — SAÚDE GERAL
+    # ════════════════════════════════════════════════════════
+    st.markdown(
+        f"### {badge_cor_an} Saúde do Contrato: **{badge_txt_an}** &nbsp;&nbsp; "
+        f"`{obra_an['cod4']}` — {obra_an['nome']}"
+    )
+    st.caption(
+        f"Modalidade: **{obra_an.get('modalidade') or '—'}** &nbsp;|&nbsp; "
+        f"Cliente: {obra_an.get('cliente') or '—'} &nbsp;|&nbsp; "
+        f"Status: {obra_an.get('status') or '—'}"
+    )
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("🛤️ Jornada",
+              f"{pct_jornada_an:.1f}%",
+              f"{total_conc_an}/{total_ap_an} entregáveis")
+    k2.metric("🏭 Físico (Fabricação)",
+              f"{pct_fab_an:.1f}%" if vol_proj_an else "—",
+              f"{vol_fab_an:,.1f} m³" if vol_proj_an else "Sem volume projeto")
+    k3.metric("💰 Financeiro",
+              f"{pct_fat_an:.1f}%" if fat_total_an else "—",
+              fmt_brl(fat_real_an) if fat_total_an else "Sem contrato financeiro")
+    prazo_lbl_an = (
+        f"+{delta_prazo_an}d" if delta_prazo_an is not None and delta_prazo_an > 0
+        else f"{delta_prazo_an}d" if delta_prazo_an is not None else "—"
+    )
+    prazo_det_an = (f"Entrega: {entrega_pact_an.strftime('%d/%m/%Y')}"
+                    if entrega_pact_an else "Sem data pactuada")
+    k4.metric("📅 Prazo", prazo_lbl_an, prazo_det_an)
+
+    st.divider()
+
+    # ════════════════════════════════════════════════════════
+    # NÍVEL 2 — CARDS DA JORNADA
+    # ════════════════════════════════════════════════════════
+    st.markdown("#### 🛤️ Jornada do Contrato")
+
+    if not jornada_an:
+        st.info("Jornada não iniciada. Acesse **🛤️ Jornada da Obra** para iniciar.")
+    else:
+        _CORES_CARD = {
+            "✅": ("#E8F5E9", "#43A047"),
+            "🔴": ("#FFEBEE", "#E53935"),
+            "🔵": ("#E3F2FD", "#1976D2"),
+            "⬜": ("#F5F5F5", "#546E7A"),
+        }
+        n_et = len(etapas_an)
+        cols_et = st.columns(n_et) if n_et > 0 else []
+        for i, (nome_et, itens_et) in enumerate(etapas_an.items()):
+            icone_et, texto_et = _derivar_etapa(itens_et)
+            conc_et  = sum(1 for x in itens_et if x["status"] == "concluido")
+            total_et = len(itens_et)
+            bg, border = _CORES_CARD.get(icone_et, ("#F5F5F5", "#546E7A"))
+            with cols_et[i]:
+                st.markdown(
+                    f"<div style='border-left:4px solid {border};background:{bg};"
+                    f"padding:12px 8px;border-radius:6px;text-align:center;min-height:110px;'>"
+                    f"<div style='font-size:1.4rem;'>{icone_et}</div>"
+                    f"<div style='font-weight:600;font-size:0.82rem;margin:4px 0;'>{nome_et}</div>"
+                    f"<div style='font-size:0.75rem;color:#555;'>{conc_et}/{total_et} itens</div>"
+                    f"<div style='font-size:0.7rem;color:#888;margin-top:2px;'>{texto_et}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True
+                )
+
+    st.divider()
+
+    # ════════════════════════════════════════════════════════
+    # NÍVEL 3 — VOLUMES & FINANCEIRO
+    # ════════════════════════════════════════════════════════
+    st.markdown("#### 📦 Volumes & Financeiro")
+
+    v1, v2, v3, v4, v5, v6 = st.columns(6)
+    with v1:
+        st.metric("Vol. Projeto", f"{vol_proj_an:,.1f} m³" if vol_proj_an else "—")
+        st.markdown("<div style='font-size:0.72rem;color:#888;'>referência contratual</div>",
+                    unsafe_allow_html=True)
+    with v2:
+        st.metric("Fabricado", f"{vol_fab_an:,.1f} m³", f"{pct_fab_an:.1f}%")
+        st.markdown(_barra_html(pct_fab_an, "#43A047"), unsafe_allow_html=True)
+    with v3:
+        st.metric("Expedido", f"{vol_exp_an:,.1f} m³", f"{pct_exp_an:.1f}%")
+        st.markdown(_barra_html(pct_exp_an, "#FB8C00"), unsafe_allow_html=True)
+    with v4:
+        st.metric("Montado", f"{vol_mont_an:,.1f} m³", f"{pct_mont_an:.1f}%")
+        st.markdown(_barra_html(pct_mont_an, "#7B1FA2"), unsafe_allow_html=True)
+    with v5:
+        st.metric("Faturado", fmt_brl(fat_real_an), f"{pct_fat_an:.1f}%")
+        st.markdown(_barra_html(pct_fat_an, "#1976D2"), unsafe_allow_html=True)
+    with v6:
+        pct_saldo_an = abs((saldo_an / fat_total_an * 100)) if fat_total_an else 0
+        cor_saldo    = "#E53935" if saldo_an < 0 else "#43A047"
+        st.metric("Saldo Contrato", fmt_brl(saldo_an))
+        st.markdown(_barra_html(pct_saldo_an, cor_saldo), unsafe_allow_html=True)
+
+    st.divider()
+
+    # ════════════════════════════════════════════════════════
+    # NÍVEL 4 — GANTT (MARCOS)
+    # ════════════════════════════════════════════════════════
+    st.markdown("#### 📅 Cronograma — Pactuado vs Real")
+
+    gantt_an = []
+
+    def _add_gantt_an(nome, ini_p, fim_p, ini_r, fim_r):
+        if ini_p and fim_p:
+            gantt_an.append(dict(Etapa=nome, Tipo="Meta Pactuada",
+                                 Inicio=ini_p, Fim=fim_p, Cor="#B0BEC5"))
+        if ini_r:
+            fim_c = fim_r if fim_r else hoje_an
+            cor = "#43A047"
+            if fim_p:
+                if fim_r and fim_r > fim_p:         cor = "#E53935"
+                elif not fim_r and hoje_an > fim_p: cor = "#E53935"
+            tipo = "Execução Real" if fim_r else "Em andamento"
+            gantt_an.append(dict(Etapa=nome, Tipo=tipo,
+                                 Inicio=ini_r, Fim=fim_c, Cor=cor))
+
+    _add_gantt_an("1. Fabricação",
+                  _safe_date(marcos_an.get("inicio_fab_pact")),
+                  _safe_date(marcos_an.get("fim_fab_pact")),
+                  _safe_date(marcos_an.get("inicio_fab_real")),
+                  _safe_date(marcos_an.get("fim_fab_real")))
+    _add_gantt_an("2. Expedição",
+                  _safe_date(marcos_an.get("inicio_exp_pact")),
+                  _safe_date(marcos_an.get("fim_exp_pact")),
+                  _safe_date(marcos_an.get("inicio_exp_real")),
+                  _safe_date(marcos_an.get("fim_exp_real")))
+    _add_gantt_an("3. Montagem",
+                  _safe_date(marcos_an.get("inicio_mont_pact")),
+                  _safe_date(marcos_an.get("entrega_pact")),
+                  _safe_date(marcos_an.get("inicio_mont_real")),
+                  _safe_date(marcos_an.get("entrega_real")))
+
+    if not gantt_an:
+        st.info("Marcos não cadastrados. Acesse **🛤️ Jornada da Obra** para preencher as datas.")
+    else:
+        df_g_an = pd.DataFrame(gantt_an)
+        fig_g_an = px.timeline(
+            df_g_an, x_start="Inicio", x_end="Fim", y="Etapa", color="Tipo",
+            color_discrete_map={
+                "Meta Pactuada": "#B0BEC5",
+                "Execução Real": "#43A047",
+                "Em andamento":  "#E53935",
+            },
+            barmode="group", height=220
+        )
+        fig_g_an.update_yaxes(autorange="reversed")
+        fig_g_an.update_layout(
+            xaxis=dict(title="", tickformat="%d/%b/%y"),
+            yaxis=dict(title=""),
+            legend=dict(orientation="h", yanchor="bottom", y=1.12, x=0, title=""),
+            margin=dict(t=5, b=5, l=5, r=5),
+        )
+        for i_t, tr in enumerate(fig_g_an.data):
+            cores_tr = df_g_an[df_g_an["Tipo"] == tr.name]["Cor"].tolist()
+            fig_g_an.data[i_t].marker.color = cores_tr
+        st.plotly_chart(fig_g_an, use_container_width=True)
+        st.caption("Cinza: Planejado | Verde: Concluído no prazo | Vermelho: Atrasado / em atraso")
+
+    st.divider()
+
+    # ════════════════════════════════════════════════════════
+    # NÍVEL 5 — PAINÉIS DE DETALHE
+    # ════════════════════════════════════════════════════════
+    st.markdown("#### 🔎 Detalhamento")
+    p1_an, p2_an, p3_an = st.columns(3)
+
+    # ── Painel 1: Pendências da Jornada ──────────────────────
+    with p1_an:
+        st.markdown("**📋 Jornada — Pendências e Impedimentos**")
+        pendencias_an = [
+            i for i in jornada_an
+            if i.get("aplicavel", True) and i["status"] in ("em_andamento", "impedido")
+        ]
+        if not pendencias_an:
+            st.caption("Nenhuma pendência ou impedimento ativo.")
+        else:
+            for item_p in pendencias_an[:10]:
+                t_p = item_p["template"]
+                icone_p = _MAP_ST_AN[item_p["status"]][0]
+                desc_p  = t_p.get("descricao", "")
+                cod_p   = t_p.get("item_cod", "")
+                imp_p   = item_p.get("impedimento") or item_p.get("observacao") or ""
+                st.markdown(
+                    f"{icone_p} **{cod_p}** {desc_p[:45]}{'…' if len(desc_p) > 45 else ''}"
+                )
+                if imp_p:
+                    st.caption(f"↳ {imp_p[:70]}")
+            if len(pendencias_an) > 10:
+                st.caption(f"… e mais {len(pendencias_an) - 10} itens")
+
+    # ── Painel 2: Produção por Produto ───────────────────────
+    with p2_an:
+        st.markdown("**🏭 Produção por Produto**")
+        if df_fab_an.empty:
+            st.caption("Sem dados de fabricação para esta obra.")
+        else:
+            df_fab_an["produto"] = df_fab_an["produto"].fillna("—") if "produto" in df_fab_an.columns else "—"
+            por_fab = df_fab_an.groupby("produto")["volume_teorico"].sum().reset_index()
+            por_fab.columns = ["Produto", "Fab m³"]
+
+            if not df_exp_an.empty and "produto" in df_exp_an.columns:
+                df_exp_an["produto"] = df_exp_an["produto"].fillna("—")
+                por_exp = df_exp_an.groupby("produto")["volume_real"].sum().reset_index()
+                por_exp.columns = ["Produto", "Exp m³"]
+                por_prod_an = por_fab.merge(por_exp, on="Produto", how="left").fillna(0)
+            else:
+                por_prod_an = por_fab.copy(); por_prod_an["Exp m³"] = 0.0
+
+            if not df_mont_an.empty and "produto" in df_mont_an.columns:
+                df_mont_an["produto"] = df_mont_an["produto"].fillna("—")
+                por_mont = df_mont_an.groupby("produto")["volume_teorico"].sum().reset_index()
+                por_mont.columns = ["Produto", "Mont m³"]
+                por_prod_an = por_prod_an.merge(por_mont, on="Produto", how="left").fillna(0)
+            else:
+                por_prod_an["Mont m³"] = 0.0
+
+            por_prod_an = por_prod_an.sort_values("Fab m³", ascending=False)
+            st.dataframe(
+                por_prod_an, use_container_width=True, hide_index=True,
+                column_config={
+                    "Fab m³":  st.column_config.NumberColumn(format="%.1f"),
+                    "Exp m³":  st.column_config.NumberColumn(format="%.1f"),
+                    "Mont m³": st.column_config.NumberColumn(format="%.1f"),
+                }
+            )
+
+    # ── Painel 3: Medições Recentes ───────────────────────────
+    with p3_an:
+        st.markdown("**💰 Medições Recentes**")
+        if df_med_an.empty:
+            st.caption("Sem medições registradas para esta obra.")
+        else:
+            df_med_show = df_med_an.sort_values("data_emissao", ascending=False).head(8).copy()
+            df_med_show["Valor"]  = df_med_show["valor"].apply(fmt_brl)
+            df_med_show["Data"]   = df_med_show["data_emissao"].dt.strftime("%d/%m/%Y").fillna("—")
+            df_med_show = df_med_show[["Data", "numero_nf", "tipo", "Valor"]]\
+                .rename(columns={"numero_nf": "NF", "tipo": "Tipo"})
+            st.dataframe(df_med_show, use_container_width=True, hide_index=True)
+            st.caption(f"Total faturado: **{fmt_brl(fat_real_an)}** de **{fmt_brl(fat_total_an)}**")
