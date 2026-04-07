@@ -321,6 +321,19 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                     help="Use quando todas as linhas do arquivo pertencem a uma única obra. "
                          "Se preenchido, tem prioridade sobre a seleção acima.")
 
+        # ── Mês de competência (Rota 8) — fora do botão para não perder ao rerun
+        if rota == "8":
+            st.info("📅 Informe o mês de competência desta folha antes de importar.")
+            mes_comp_r8 = st.date_input(
+                "Mês de competência (selecione o dia 1 do mês)",
+                value=None,
+                key="folha_mes_comp",
+                format="DD/MM/YYYY",
+                help="Selecione o primeiro dia do mês referente a esta folha. Ex: 01/01/2025"
+            )
+            if not mes_comp_r8:
+                st.warning("⚠️ Selecione o mês de competência para continuar.")
+
         if st.button("🚀 Importar", type="primary"):
             with st.spinner("Processando..."):
                 try:
@@ -705,17 +718,10 @@ if pagina_selecionada == "📥 Importador de Arquivos":
 
                     # ══ ROTA 8 — FOLHA / RH ═══════════════════════════════════
                     elif rota == "8":
-                        # Pede o mês de competência antes de processar
-                        st.info("📅 Informe o mês de competência desta folha antes de importar.")
-                        mes_comp = st.date_input(
-                            "Mês de competência (selecione o dia 1 do mês)",
-                            value=None,
-                            key="folha_mes_comp",
-                            format="DD/MM/YYYY",
-                            help="Selecione o primeiro dia do mês referente a esta folha. Ex: 01/01/2025"
-                        )
+                        # Recupera mês selecionado fora do botão
+                        mes_comp = st.session_state.get("folha_mes_comp")
                         if not mes_comp:
-                            st.warning("⚠️ Selecione o mês de competência para continuar.")
+                            st.warning("⚠️ Selecione o mês de competência antes de importar.")
                             st.stop()
 
                         # Lê o arquivo como xlsx
