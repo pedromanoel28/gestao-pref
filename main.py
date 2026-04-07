@@ -4296,13 +4296,38 @@ elif pagina_selecionada == "✏️ Editar Obras":
         r = supabase.table("obras_financeiro").select(cols).execute()
         return pd.DataFrame(r.data or [])
 
+    def _val_seguro(v):
+        """Converte qualquer valor pandas/numpy para tipo JSON-seguro."""
+        if v is None:
+            return None
+        try:
+            if pd.isna(v):
+                return None
+        except (TypeError, ValueError):
+            pass
+        return v
+
+    def _str_seguro(v):
+        """String limpa ou None — nunca 'nan'/'None' literais."""
+        v2 = _val_seguro(v)
+        if v2 is None:
+            return None
+        s = str(v2).strip()
+        return None if s.lower() in ("nan", "nat", "none", "na", "") else s
+
     tab_obras, tab_fin = st.tabs(["🏗️ Obras", "💰 Financeiro"])
 
     # ═══════════════════════════════════════════════════════════
     # ABA 1 — OBRAS
     # ═══════════════════════════════════════════════════════════
     with tab_obras:
-        df_ob = _ed_obras()
+        # Bufferiza o DataFrame em session_state para que limpezas de cache
+        # não resetem o data_editor enquanto o usuário ainda está editando.
+        if "ed_obras_buf" not in st.session_state:
+            st.session_state["ed_obras_buf"] = _ed_obras()
+
+        df_ob = st.session_state["ed_obras_buf"]
+
         if df_ob.empty:
             st.info("Nenhuma obra cadastrada.")
         else:
@@ -4333,28 +4358,37 @@ elif pagina_selecionada == "✏️ Editar Obras":
                 erros, ok = [], 0
                 for _, row in df_ob_edit.iterrows():
                     try:
-                        supabase.table("obras").update({
-                            "cod4":       str(row["cod4"]).strip() if row["cod4"] else None,
-                            "nome":       str(row["nome"]).strip() if row["nome"] else None,
-                            "status":     str(row["status"]) if row["status"] else None,
-                            "modalidade": str(row["modalidade"]).strip()
-                                          if row.get("modalidade") else None,
-                            "cliente":    str(row["cliente"]).strip()
-                                          if row.get("cliente") else None,
-                        }).eq("id", int(row["id"])).execute()
+                        payload_o = {
+                            "cod4":       _str_seguro(row.get("cod4")),
+                            "nome":       _str_seguro(row.get("nome")),
+                            "status":     _str_seguro(row.get("status")),
+                            "modalidade": _str_seguro(row.get("modalidade")),
+                            "cliente":    _str_seguro(row.get("cliente")),
+                        }
+                        # Remove campos None para não sobrescrever com NULL
+                        payload_o = {k: v for k, v in payload_o.items() if v is not None}
+                        if payload_o:
+                            supabase.table("obras").update(payload_o)\
+                                .eq("id", int(row["id"])).execute()
                         ok += 1
                     except Exception as _ex:
                         erros.append(f"ID {row['id']}: {_ex}")
+                # Limpa caches e recarrega buffer com dados frescos do banco
                 try: _ed_obras.clear()
                 except: pass
                 try: carregar_obras_completo.clear()
                 except: pass
                 try: carregar_obras_ativas.clear()
                 except: pass
+                # Atualiza o buffer e reseta o widget do data_editor
+                st.session_state["ed_obras_buf"] = _ed_obras()
+                if "editor_obras" in st.session_state:
+                    del st.session_state["editor_obras"]
                 if erros:
                     st.error(f"❌ {len(erros)} erro(s):\n" + "\n".join(erros))
                 else:
                     st.success(f"✅ {ok} obra(s) atualizadas!")
+                    st.rerun()
 
     # ═══════════════════════════════════════════════════════════
     # ABA 2 — FINANCEIRO
