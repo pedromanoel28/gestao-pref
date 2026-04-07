@@ -564,7 +564,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             if col7 in df7.columns:
                                 df7[col7] = pd.to_numeric(df7[col7], errors="coerce")
                                 df7[col7] = df7[col7].where(pd.notnull(df7[col7]), None)
-                        cols_bd7 = ["obra_id","data","id_lancamento","numero_doc",
+                        cols_bd7 = ["data","id_lancamento","numero_doc",
                                     "centro_custos","conta_macro","conta_gerencial",
                                     "cli_fornecedor","produto_servico","criado_por",
                                     "valor_global","qtd","preco_unitario","origem",
