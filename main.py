@@ -460,6 +460,10 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         df_p["obra_id"]   = aplicar_obra_id(
                             df_p["obra_codigo"].apply(extrair_codigo), mob_p)
                         df_p["cod4_obra"] = df_p["obra_codigo"].apply(extrair_codigo)
+                        df_p["cod4_obra"] = df_p["cod4_obra"].apply(
+                            lambda v: None if (v is None or str(v).strip().lower()
+                                               in ("nan","none","")) else str(v)
+                        )
                         sem_obra_p = int(df_p["obra_id"].isna().sum())
                         df_p[date_p] = formatar_data(df_p[date_p])
                         for c_p in num_p:
