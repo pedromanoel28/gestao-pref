@@ -214,6 +214,10 @@ if pagina_selecionada == "📥 Importador de Arquivos":
         except: pass
         try: carregar_custos_resumo.clear()
         except: pass
+        try: carregar_receitas_resumo.clear()
+        except: pass
+        try: carregar_despesas_resumo.clear()
+        except: pass
         try: carregar_equipe_ativa.clear()
         except: pass
 
@@ -225,16 +229,19 @@ if pagina_selecionada == "📥 Importador de Arquivos":
         "4. Fabricação          → exportação ERP peça a peça",
         "5. Transporte          → exportação ERP expedição",
         "6. Montagem            → exportação ERP montagem",
-        "7. Custos              → exportação ERP lançamentos",
+        "7. Custos              → exportação XLSX do sistema RM",
         "8. Folha / RH          → exportação XLSX mensal de folha de pagamento",
+        "9. Receitas (RM)       → exportação XLSX do sistema RM",
+        "10. Despesas (RM)      → exportação XLSX do sistema RM",
     ])
-    rota = opcao.strip()[0]          # "1" … "8"
+    # Extrai o número da rota (suporta 2 dígitos: "10")
+    rota = opcao.strip().split(".")[0].strip()
 
     arquivo = st.file_uploader("Arraste o arquivo aqui", type=["csv", "xlsx"])
 
     if arquivo:
         # ── leitura automática (sep ; ou ,) ───────────────────────────────────
-        if rota == "8":
+        if rota in ("7", "8", "9", "10"):
             # XLSX — pré-visualização via openpyxl
             try:
                 arquivo.seek(0)
@@ -255,14 +262,17 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                 st.error(f"❌ Erro ao ler CSV: {e}")
                 st.stop()
 
-        # ── Correlação com Obras (rotas 4–7) ─────────────────────────────────
-        if rota in ["4","5","6","7"]:
+        # ── Correlação com Obras (rotas 4–7, 9, 10) ──────────────────────────
+        if rota in ["4","5","6","7","9","10"]:
             arquivo.seek(0)
-            _df_corr = pd.read_csv(arquivo, sep=None, engine="python",
-                                   encoding="utf-8-sig", dtype=str, header=0)
+            if rota in ("7", "9", "10"):
+                _df_corr = pd.read_excel(arquivo, engine="openpyxl", dtype=str)
+            else:
+                _df_corr = pd.read_csv(arquivo, sep=None, engine="python",
+                                       encoding="utf-8-sig", dtype=str, header=0)
             _df_corr.columns = [c.strip() for c in _df_corr.columns]
             # Renomear para nomes canônicos conforme a rota
-            if rota == "7":
+            if rota in ("7", "9", "10"):
                 _cm7 = {
                     "Data":"data","IdLanç":"id_lancamento","NºDoc":"numero_doc",
                     "Centro de Custos":"centro_custos","Conta Macro":"conta_macro",
@@ -296,7 +306,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                 if len(_ss) > 0:
                     _top_cod = _ss.value_counts().index[0]
                     _cands_corr.append((_cc, _top_cod, len(_ss)))
-            with st.expander("🔗 Correlação com Obras", expanded=(rota == "7")):
+            with st.expander("🔗 Correlação com Obras", expanded=(rota in ("7","9","10"))):
                 if _cands_corr:
                     st.dataframe(
                         pd.DataFrame(_cands_corr,
@@ -608,8 +618,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                     # ══ ROTA 7 — CUSTOS ═══════════════════════════════════════
                     elif rota == "7":
                         arquivo.seek(0)
-                        df7 = pd.read_csv(arquivo, sep=None, engine="python",
-                                          encoding="utf-8-sig", dtype=str, header=0)
+                        df7 = pd.read_excel(arquivo, engine="openpyxl", dtype=str)
                         # Mapeamento exato de colunas (nomes do Export.csv do ERP)
                         col_map = {
                             # nomes exatos do Export.csv do ERP
@@ -692,11 +701,14 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             if col7 in df7.columns:
                                 df7[col7] = pd.to_numeric(df7[col7], errors="coerce")
                                 df7[col7] = df7[col7].where(pd.notnull(df7[col7]), None)
+                        # Extrai cod4 do centro_custos
+                        if "centro_custos" in df7.columns:
+                            df7["cod4"] = df7["centro_custos"].apply(extrair_codigo)
                         cols_bd7 = ["data","id_lancamento","numero_doc",
                                     "centro_custos","conta_macro","conta_gerencial",
                                     "cli_fornecedor","produto_servico","criado_por",
                                     "valor_global","qtd","preco_unitario","origem",
-                                    "chave_coligada","cod_tipo_doc"]
+                                    "chave_coligada","cod_tipo_doc","cod4"]
                         cols_bd7_ok = [c for c in cols_bd7 if c in df7.columns]
                         pacote7_raw = df7[cols_bd7_ok].to_dict("records")
                         pacote7 = []
@@ -715,6 +727,75 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         _inline_cache_clear()
                         st.success(f"🎉 {total7} lançamentos importados!")
                         st.info(f"✅ {com_obra7} diretos (com obra) | 🏭 {sem_obra7} indiretos")
+
+                    # ══ ROTAS 9 / 10 — RECEITAS / DESPESAS (RM) ══════════════
+                    elif rota in ("9", "10"):
+                        tabela_rm = "receitas" if rota == "9" else "despesas"
+                        label_rm  = "Receitas" if rota == "9" else "Despesas"
+
+                        try:
+                            arquivo.seek(0)
+                            df_rm = pd.read_excel(arquivo, engine="openpyxl", dtype=str)
+                        except Exception as e:
+                            st.error(f"❌ Erro ao ler XLSX: {e}")
+                            st.stop()
+
+                        # Strip de espaços nos nomes de colunas
+                        df_rm.columns = [c.strip() for c in df_rm.columns]
+
+                        # Mapeamento de colunas
+                        col_map_rm = {
+                            "Data":                       "data",
+                            "IdLanç":                     "id_lancamento",
+                            "NºDoc":                      "numero_doc",
+                            "Centro de Custos":           "centro_custos",
+                            "Conta Macro":                "conta_macro",
+                            "Conta Gerencial":            "conta_gerencial",
+                            "Cli/For":                    "cli_fornecedor",
+                            "Produto_Serviço":            "produto_servico",
+                            "Produto_Servico":            "produto_servico",
+                            "CriadoPor":                  "criado_por",
+                            " Valor Global ":             "valor_global",
+                            "Valor Global":               "valor_global",
+                            "Qtd":                        "qtd",
+                            " PrecoUnitario ":            "preco_unitario",
+                            "PrecoUnitario":              "preco_unitario",
+                            "Origem":                     "origem",
+                            "Chave_ColigadaIdOrigem":     "chave_coligada",
+                            "Cód. e Tipo Doc/Movimento":  "cod_tipo_doc",
+                        }
+                        df_rm = df_rm.rename(columns=col_map_rm)
+
+                        # Extrai cod4 do centro_custos
+                        if "centro_custos" in df_rm.columns:
+                            df_rm["cod4"] = df_rm["centro_custos"].apply(extrair_codigo)
+                            com_obra_rm = int(df_rm["cod4"].notna().sum())
+                            sem_obra_rm = int(df_rm["cod4"].isna().sum())
+                        else:
+                            com_obra_rm, sem_obra_rm = 0, len(df_rm)
+
+                        # Formata datas e numéricos
+                        df_rm = df_rm.replace("", None).where(pd.notnull(df_rm), None)
+                        if "data" in df_rm.columns:
+                            df_rm["data"] = formatar_data(df_rm["data"])
+                        for col_rm in ["valor_global", "qtd", "preco_unitario"]:
+                            if col_rm in df_rm.columns:
+                                df_rm[col_rm] = pd.to_numeric(df_rm[col_rm], errors="coerce")
+                                df_rm[col_rm] = df_rm[col_rm].where(pd.notnull(df_rm[col_rm]), None)
+
+                        cols_bd_rm = ["data","id_lancamento","numero_doc",
+                                      "centro_custos","conta_macro","conta_gerencial",
+                                      "cli_fornecedor","produto_servico","criado_por",
+                                      "valor_global","qtd","preco_unitario","origem",
+                                      "chave_coligada","cod_tipo_doc","cod4"]
+                        cols_bd_rm_ok = [c for c in cols_bd_rm if c in df_rm.columns]
+                        pacote_rm_raw = df_rm[cols_bd_rm_ok].to_dict("records")
+                        pacote_rm = limpar_nan_pacote(pacote_rm_raw)
+
+                        total_rm = enviar_lotes(tabela_rm, pacote_rm, f"Enviando {label_rm}...")
+                        _inline_cache_clear()
+                        st.success(f"🎉 {total_rm} lançamentos de {label_rm} importados!")
+                        st.info(f"✅ {com_obra_rm} com cod4 (vinculados) | 🏭 {sem_obra_rm} sem cod4")
 
                     # ══ ROTA 8 — FOLHA / RH ═══════════════════════════════════
                     elif rota == "8":
