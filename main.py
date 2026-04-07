@@ -2014,12 +2014,18 @@ elif pagina_selecionada == "💰 Financeiro":
         df_of = pd.DataFrame(resp_of.data)
         df_o  = pd.DataFrame(resp_o.data or [])
         if not df_o.empty and "cod4" in df_of.columns:
-            df = df_of.merge(df_o, on="cod4", how="left", suffixes=("", "_obras"))
-            df = df.rename(columns={
-                "id":        "obra_id",
-                "nome":      "obra_nome",
-                "status":    "obra_status",
+            # Rename obras cols before merge to avoid collision with
+            # obras_financeiro cols (e.g. obra_nome already exists there)
+            df_o_ren = df_o.rename(columns={
+                "id":     "obra_id",
+                "nome":   "obra_nome",
+                "status": "obra_status",
             })
+            # Drop columns from df_of that will come from obras (avoid duplicates)
+            for _col in ["obra_id", "obra_nome", "obra_status", "modalidade", "cliente"]:
+                if _col in df_of.columns:
+                    df_of = df_of.drop(columns=[_col])
+            df = df_of.merge(df_o_ren, on="cod4", how="left")
         else:
             df = df_of.copy()
             for col in ("obra_id", "obra_nome", "obra_status", "modalidade", "cliente"):
@@ -4360,7 +4366,14 @@ elif pagina_selecionada == "✏️ Editar Obras":
         else:
             # Mostrar também o nome da obra para contexto
             df_ob2 = _ed_obras()[["cod4","nome"]].rename(columns={"nome":"obra_nome"})
-            df_fin_show = df_fin.merge(df_ob2, on="cod4", how="left")
+            # Drop obra_nome from df_fin if already present (evita coluna duplicada)
+            df_fin_m = df_fin.drop(columns=["obra_nome"], errors="ignore")
+            df_fin_show = df_fin_m.merge(df_ob2, on="cod4", how="left")
+            # data_contrato precisa ser datetime para DateColumn funcionar
+            if "data_contrato" in df_fin_show.columns:
+                df_fin_show["data_contrato"] = pd.to_datetime(
+                    df_fin_show["data_contrato"], errors="coerce"
+                )
             # Reordenar: nome primeiro
             cols_show = ["obra_nome","cod4","faturamento_total","volume","volume_projeto",
                          "custo_total","lucro","responsavel","cnpj","razao_social","data_contrato"]
