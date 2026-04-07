@@ -1355,7 +1355,10 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
     # ── SELEÇÃO DE OBRA ───────────────────────────────────
     r1,r2,r3 = st.columns([1,3,1])
     status_disponiveis = sorted(set(o.get("status") or "—" for o in obras))
-    filtro_status_obra = r1.selectbox("Status",["Todos"]+status_disponiveis,
+    _status_opts_go = ["Todos"] + status_disponiveis
+    _default_go = _status_opts_go.index("Em Andamento") if "Em Andamento" in _status_opts_go else 0
+    filtro_status_obra = r1.selectbox("Status", _status_opts_go,
+        index=_default_go,
         key="filt_obra_status", label_visibility="collapsed")
 
     obras_filtradas = obras if filtro_status_obra == "Todos" \
@@ -2480,11 +2483,14 @@ elif pagina_selecionada == "💰 Financeiro":
     # ══════════════════════════════════════════════════════════
     with tab_obra:
         ob1, ob2 = st.columns(2)
-        sel_ob_per = ob1.selectbox("Período", ["Ativas", "Todas"], key="obra_periodo")
+        _st_opts_fin = ["Todos"] + sorted(df_of["obra_status"].dropna().unique().tolist())
+        _st_def_fin  = _st_opts_fin.index("Em Andamento") if "Em Andamento" in _st_opts_fin else 0
+        sel_ob_st = ob1.selectbox("Status", _st_opts_fin, index=_st_def_fin,
+                                   key="fin_obra_status", label_visibility="collapsed")
 
         df_ob_disp = df_of.copy()
-        if sel_ob_per == "Ativas":
-            df_ob_disp = df_ob_disp[df_ob_disp["obra_status"] == "Em Andamento"]
+        if sel_ob_st != "Todos":
+            df_ob_disp = df_ob_disp[df_ob_disp["obra_status"] == sel_ob_st]
         df_ob_disp = df_ob_disp.sort_values("obra_nome")
 
         if df_ob_disp.empty:
@@ -2853,11 +2859,10 @@ elif pagina_selecionada == "🏭 Produção":
     st.header("🏭 Dashboard de Produção")
 
     obras_lista = carregar_obras_ativas()
-    obras_map   = {o["id"]: f"{o['cod4']} — {o['nome']}" for o in obras_lista}
 
     hoje = date.today()
 
-    f1, f2, f3, f4 = st.columns([2, 2, 4, 1])
+    f1, f2, f3, f4, f5 = st.columns([2, 2, 1, 4, 1])
     tipo_periodo = f1.radio("Tipo de período", ["Predefinido", "Personalizado"],
                              horizontal=True, key="prod_tipo_periodo")
 
@@ -2897,9 +2902,16 @@ elif pagina_selecionada == "🏭 Produção":
             fim_str    = hoje.isoformat()
             n_meses_ev = 1
 
-    sel_obras = f3.multiselect("Obras", list(obras_map.values()), key="prod_obras",
+    _st_opts_prod = ["Todos"] + sorted(set(o.get("status") or "—" for o in obras_lista))
+    _st_def_prod  = _st_opts_prod.index("Em Andamento") if "Em Andamento" in _st_opts_prod else 0
+    _st_sel_prod  = f3.selectbox("Status", _st_opts_prod, index=_st_def_prod,
+                                  key="prod_status_sel", label_visibility="collapsed")
+    obras_prod_fil = obras_lista if _st_sel_prod == "Todos" else [o for o in obras_lista if o.get("status") == _st_sel_prod]
+    obras_map = {o["id"]: f"{o['cod4']} — {o['nome']}" for o in obras_prod_fil}
+
+    sel_obras = f4.multiselect("Obras", list(obras_map.values()), key="prod_obras",
                                 placeholder="Todas as obras")
-    if f4.button("🔄 Atualizar", key="btn_prod_refresh"):
+    if f5.button("🔄 Atualizar", key="btn_prod_refresh"):
         carregar_fabricacao.clear()
         carregar_transporte_prod.clear()
         carregar_montagem_prod.clear()
@@ -3725,9 +3737,17 @@ elif pagina_selecionada == "🛤️ Jornada da Obra":
     if not obras:
         st.warning("Nenhuma obra cadastrada."); st.stop()
 
-    c1, c2, c3 = st.columns([3, 1, 1])
-    obras_map = {f"{o['cod4']} — {o['nome']}": o for o in obras}
-    obra_sel_str = c1.selectbox("Selecione a Obra", list(obras_map.keys()), label_visibility="collapsed")
+    c1, c2, c3 = st.columns([1, 3, 1])
+    _st_opts_jor = ["Todos"] + sorted(set(o.get("status") or "—" for o in obras))
+    _st_def_jor  = _st_opts_jor.index("Em Andamento") if "Em Andamento" in _st_opts_jor else 0
+    _st_sel_jor  = c1.selectbox("Status", _st_opts_jor, index=_st_def_jor,
+                                 key="jor_status_sel", label_visibility="collapsed")
+    obras_jor = obras if _st_sel_jor == "Todos" else [o for o in obras if o.get("status") == _st_sel_jor]
+    if not obras_jor:
+        st.warning("Nenhuma obra para o status selecionado."); st.stop()
+
+    obras_map = {f"{o['cod4']} — {o['nome']}": o for o in obras_jor}
+    obra_sel_str = c2.selectbox("Selecione a Obra", list(obras_map.keys()), label_visibility="collapsed")
     obra_sel = obras_map[obra_sel_str]
     obra_id = obra_sel["id"]
     modalidade = obra_sel.get("modalidade") or "Montagem"
@@ -4105,8 +4125,16 @@ elif pagina_selecionada == "🔍 Análise da Obra":
     if not obras_an:
         st.warning("Nenhuma obra cadastrada."); st.stop()
 
-    c_sel, c_btn = st.columns([5, 1])
-    obras_map_an = {f"{o['cod4']} — {o['nome']}": o for o in obras_an}
+    c_st_an, c_sel, c_btn = st.columns([1, 4, 1])
+    _st_opts_an = ["Todos"] + sorted(set(o.get("status") or "—" for o in obras_an))
+    _st_def_an  = _st_opts_an.index("Em Andamento") if "Em Andamento" in _st_opts_an else 0
+    _st_sel_an  = c_st_an.selectbox("Status", _st_opts_an, index=_st_def_an,
+                                     key="an_status_sel", label_visibility="collapsed")
+    obras_an_fil = obras_an if _st_sel_an == "Todos" else [o for o in obras_an if o.get("status") == _st_sel_an]
+    if not obras_an_fil:
+        st.warning("Nenhuma obra para o status selecionado."); st.stop()
+
+    obras_map_an = {f"{o['cod4']} — {o['nome']}": o for o in obras_an_fil}
     obra_lbl_an  = c_sel.selectbox("Selecione a Obra", list(obras_map_an.keys()),
                                    label_visibility="collapsed", key="analise_obra_sel")
     obra_an      = obras_map_an[obra_lbl_an]
