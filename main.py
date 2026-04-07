@@ -5592,13 +5592,14 @@ elif pagina_selecionada == "💸 Custos & Despesas":
             _d = _ev[_ev["grupo_custo"] == _grp]
             if _d.empty:
                 continue
-            _d = _d.set_index("mes").reindex(_meses_ord, fill_value=0).reset_index()
+            _d = (_d.set_index("mes")[["valor_global"]]
+                  .reindex(_meses_ord, fill_value=0).reset_index())
             fig_ev.add_trace(go.Bar(
                 x=_d["mes"], y=_d["valor_global"],
                 name=_grp, marker_color=_cor,
                 hovertemplate=f"<b>{_grp}</b><br>%{{x}}<br>R$ %{{y:,.0f}}<extra></extra>"
             ))
-        _ev_tot_ord = _ev_tot.set_index("mes").reindex(_meses_ord, fill_value=0).reset_index()
+        _ev_tot_ord = _ev_tot.set_index("mes")[["total"]].reindex(_meses_ord, fill_value=0).reset_index()
         fig_ev.add_trace(go.Scatter(
             x=_ev_tot_ord["mes"], y=_ev_tot_ord["total"],
             name="Total", mode="lines+markers",
@@ -6312,7 +6313,8 @@ elif pagina_selecionada == "💸 Custos & Despesas":
                 _d = _trib_ev[_trib_ev["grupo_tributo"] == _grp_t]
                 if _d.empty:
                     continue
-                _d = _d.set_index("mes").reindex(_meses_t_ord, fill_value=0).reset_index()
+                _d = (_d.set_index("mes")[["valor_global"]]
+                      .reindex(_meses_t_ord, fill_value=0).reset_index())
                 fig_tev.add_trace(go.Bar(
                     x=_d["mes"], y=_d["valor_global"],
                     name=_grp_t, marker_color=_cor_t,
