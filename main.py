@@ -1,7 +1,11 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import re
 from supabase import create_client
+import plotly.graph_objects as go
+import plotly.express as px
+from datetime import date, timedelta
 
 # ==========================================================
 # CONFIGURAÇÃO
@@ -25,7 +29,8 @@ st.sidebar.caption("OBRAS & MEDIÇÕES")
 st.sidebar.divider()
 
 pagina_selecionada = st.sidebar.radio("Menu Principal", [
-    "--- 📊 DASHBOARDS ---", "🏭 Produção", "💰 Financeiro", "🔍 Análise da Obra", "👷 Folha / RH",
+    "--- 📊 DASHBOARDS ---", "🏭 Produção", "💰 Financeiro", "💸 Custos & Despesas",
+    "🔍 Análise da Obra", "👷 Folha / RH",
     "--- 🛠️ GESTÃO ---", "🏗️ Gestão de Obras", "🛤️ Jornada da Obra", "👥 Equipe",
     "📋 Gestão à Vista", "👤 Reunião 1:1",
     "--- 🗄️ BASE DE DADOS ---", "✏️ Editar Obras", "📥 Importador de Arquivos"
@@ -119,12 +124,12 @@ def nulos(df):
         )
     return df
 
+@st.cache_data(ttl=600)
 def mapa_obras():
     """Dicionário código-4-dígitos → id do banco."""
     dados = supabase.table("obras").select("id, cod4").execute().data
     m = {}
     for o in dados:
-        # Puxa a nova coluna cod4
         c = str(o["cod4"]).strip()[:4] if o.get("cod4") else None
         if c and c.isdigit(): m[c] = o["id"]
     return m
@@ -138,6 +143,7 @@ def aplicar_obra_id(serie_codigos, mob):
         ids.append(int(v) if v is not None else None)
     return pd.array(ids, dtype=object)
 
+@st.cache_data(ttl=600)
 def mapa_equipe():
     dados = supabase.table("equipe").select("id, nome").execute().data
     return {normalize(e["nome"]): e["id"] for e in dados}
@@ -200,6 +206,10 @@ if pagina_selecionada == "📥 Importador de Arquivos":
         return str(val).strip()
 
     def _inline_cache_clear():
+        try: mapa_obras.clear()
+        except: pass
+        try: mapa_equipe.clear()
+        except: pass
         try: carregar_obras_ativas.clear()
         except: pass
         try: carregar_obras_completo.clear()
@@ -214,9 +224,9 @@ if pagina_selecionada == "📥 Importador de Arquivos":
         except: pass
         try: carregar_custos_resumo.clear()
         except: pass
-        try: carregar_receitas_resumo.clear()
+        try: carregar_custos_dashboard.clear()
         except: pass
-        try: carregar_despesas_resumo.clear()
+        try: carregar_despesas_dashboard.clear()
         except: pass
         try: carregar_equipe_ativa.clear()
         except: pass
@@ -962,24 +972,24 @@ elif pagina_selecionada == "👥 Equipe":
 # FUNÇÕES AUXILIARES DA SÚMULA
 # ==========================================================
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=600)
 def carregar_obras_ativas():
     resp = supabase.table("obras")\
         .select("id, cod4, nome, status, modalidade, cliente, responsavel_id")\
         .order("nome").execute()
     return resp.data
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=600)
 def carregar_equipe_ativa():
     resp = supabase.table("equipe").select("id, nome").eq("status","Ativo").order("nome").execute()
     return resp.data
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=3600)
 def carregar_template():
     resp = supabase.table("template_jornada").select("*").order("item").execute()
     return resp.data
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=120)
 def carregar_tarefas(obra_id):
     resp = supabase.table("obras_tarefas")\
         .select("id, item, etapa, descricao, status, observacoes, impedimento, "
@@ -992,7 +1002,7 @@ def carregar_tarefas(obra_id):
         .execute()
     return resp.data
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def carregar_alertas():
     from datetime import date, timedelta
     hoje  = date.today()
@@ -1044,7 +1054,7 @@ def parse_date(val):
         return date.fromisoformat(str(val))
     except: return None
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=600)
 def carregar_ultimo_update():
     """Busca o último created_at por obra sem varrer toda a tabela.
     Limit de 1000 cobre até ~100 obras com folga e é ordens de grandeza
@@ -1061,7 +1071,7 @@ def carregar_ultimo_update():
     except:
         return {}
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=120)
 def carregar_tarefas_colab(colab_id):
     """Busca todas as tarefas onde o colaborador aparece em qualquer papel RACI."""
     resp = supabase.table("obras_tarefas")\
@@ -1083,6 +1093,8 @@ def limpar_cache():
     carregar_alertas.clear()
     carregar_ultimo_update.clear()
     carregar_tarefas_colab.clear()
+    mapa_obras.clear()
+    mapa_equipe.clear()
     try: carregar_obras_completo.clear()
     except: pass
     try: carregar_medicoes_resumo.clear()
@@ -1197,7 +1209,7 @@ def volume_referencia(obra_id):
 # FUNÇÕES COMPARTILHADAS — TODOS OS DASHBOARDS
 # ==========================================================
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=600)
 def carregar_obras_completo():
     """obras LEFT JOIN obras_financeiro — base de todos os dashboards."""
     resp_o = supabase.table("obras")\
@@ -1231,7 +1243,7 @@ def carregar_obras_completo():
             df[c] = pd.to_numeric(df[c], errors="coerce")
     return df
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=900)
 def carregar_medicoes_resumo():
     """medicoes sem canceladas/remessas, com campo mes."""
     rows, page, size = [], 0, 1000
@@ -1252,20 +1264,13 @@ def carregar_medicoes_resumo():
     df["mes"]          = df["data_emissao"].dt.to_period("M").astype(str)
     return df
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=900)
 def carregar_producao_resumo():
     """producao_fabricacao com dedup por (obra_id, peca) — volume_teorico correto."""
-    size = 1000
-    try:
-        cols = ("obra_id, peca, produto, secao, etapa, qtde_pecas,"
-                " volume_teorico, volume_total, peso_aco_frouxo,"
-                " peso_aco_protendido, peso_aco, data_fabricacao")
-        # testa se colunas existem
-        supabase.table("producao_fabricacao").select(cols).range(0, 0).execute()
-    except Exception:
-        cols = ("obra_id, peca, produto, etapa, volume_teorico,"
-                " volume_total, peso_aco, data_fabricacao")
-    rows, page = [], 0
+    cols = ("obra_id, peca, produto, secao, etapa, qtde_pecas,"
+            " volume_teorico, volume_total, peso_aco_frouxo,"
+            " peso_aco_protendido, peso_aco, data_fabricacao")
+    rows, page, size = [], 0, 5000
     q = supabase.table("producao_fabricacao").select(cols)
     while True:
         resp = q.range(page * size, (page + 1) * size - 1).execute()
@@ -1284,10 +1289,10 @@ def carregar_producao_resumo():
     df["mes"] = df["data_fabricacao"].dt.to_period("M").astype(str)
     return df
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=900)
 def carregar_transporte_resumo():
     """producao_transporte resumido para dashboards."""
-    rows, page, size = [], 0, 1000
+    rows, page, size = [], 0, 5000
     q = supabase.table("producao_transporte")\
         .select("obra_id, produto, volume_real, data_expedicao")
     while True:
@@ -1303,10 +1308,10 @@ def carregar_transporte_resumo():
     df["mes"]            = df["data_expedicao"].dt.to_period("M").astype(str)
     return df
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=900)
 def carregar_montagem_resumo():
     """producao_montagem resumido para dashboards."""
-    rows, page, size = [], 0, 1000
+    rows, page, size = [], 0, 5000
     q = supabase.table("producao_montagem")\
         .select("obra_id, produto, volume_teorico, data_montagem")
     while True:
@@ -1322,7 +1327,7 @@ def carregar_montagem_resumo():
     df["mes"]            = df["data_montagem"].dt.to_period("M").astype(str)
     return df
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=900)
 def carregar_custos_resumo():
     """custos para eficiência — valor_global em abs()."""
     rows, page, size = [], 0, 1000
@@ -1341,7 +1346,7 @@ def carregar_custos_resumo():
     df["mes"]          = df["data"].dt.to_period("M").astype(str)
     return df
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300)
 def carregar_tarefas_extras():
     """Tarefas extras — obra_id IS NULL (não vinculadas a obra)."""
     resp = supabase.table("obras_tarefas")\
@@ -1403,7 +1408,6 @@ def fmt_brl(valor):
 # PÁGINA: GESTÃO DE OBRAS (SÚMULA)
 # ==========================================================
 if pagina_selecionada == "🏗️ Gestão de Obras":
-    import pandas as pd
     from datetime import date
 
     STATUS_OPCOES = ["A Iniciar","Em Andamento","Impedido","Concluído","N/A"]
@@ -1772,8 +1776,7 @@ if pagina_selecionada == "🏗️ Gestão de Obras":
     # ABA DASHBOARD DA OBRA
     # ════════════════════════════════════════════════════════
     with aba_dash:
-        import plotly.graph_objects as _go
-        import plotly.express as _px
+        _go = go
 
         with st.spinner("Carregando dashboard..."):
             _df_oc   = carregar_obras_completo()
@@ -2229,12 +2232,10 @@ elif pagina_selecionada == "👤 Reunião 1:1":
 # PÁGINA: FINANCEIRO — DASHBOARD DE CUSTOS
 # ==========================================================
 elif pagina_selecionada == "💰 Financeiro":
-    import plotly.graph_objects as go
-    import plotly.express as px
 
     # ── FUNÇÕES DE CARGA ────────────────────────────────────
 
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=600)
     def carregar_obras_financeiro():
         resp_of = supabase.table("obras_financeiro").select("*").execute()
         if not resp_of.data:
@@ -2276,7 +2277,7 @@ elif pagina_selecionada == "💰 Financeiro":
                 df[c] = pd.to_numeric(df[c], errors="coerce")
         return df
 
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=600)
     def carregar_medicoes():
         # Filtragem de tipo feita em Python — not_.in_ combinado com range()
         # causa APIError em certas versões do supabase-py
@@ -2296,7 +2297,7 @@ elif pagina_selecionada == "💰 Financeiro":
         df["mes"]          = df["data_emissao"].dt.to_period("M").astype(str)
         return df
 
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=600)
     def carregar_medicoes_completas(obra_id):
         rows, page, size = [], 0, 1000
         q = supabase.table("medicoes").select("*").eq("obra_id", obra_id)
@@ -2328,15 +2329,15 @@ elif pagina_selecionada == "💰 Financeiro":
         df[col_vol] = pd.to_numeric(df[col_vol], errors="coerce").fillna(0)
         return df.groupby("obra_id")[col_vol].sum().to_dict()
 
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=900)
     def volume_fabricado_por_obra():
         return _carregar_volumes("producao_fabricacao", "volume_teorico", "data_fabricacao")
 
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=900)
     def volume_expedido_por_obra():
         return _carregar_volumes("producao_transporte", "volume_real", "data_expedicao")
 
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=900)
     def volume_montado_por_obra():
         return _carregar_volumes("producao_montagem", "volume_teorico", "data_montagem")
 
@@ -2789,15 +2790,12 @@ elif pagina_selecionada == "💰 Financeiro":
 # PÁGINA: PRODUÇÃO — DASHBOARD OPERACIONAL
 # ==========================================================
 elif pagina_selecionada == "🏭 Produção":
-    import plotly.graph_objects as go
-    import plotly.express as px
-    from datetime import date, timedelta
 
     # ── FUNÇÕES DE CARGA ────────────────────────────────────
-    @st.cache_data(ttl=600)
+    @st.cache_data(ttl=900)
     def carregar_fabricacao(inicio, fim):
         def _query(cols):
-            rows, page, size = [], 0, 1000
+            rows, page, size = [], 0, 5000
             q = supabase.table("producao_fabricacao").select(cols)
             if inicio: q = q.gte("data_fabricacao", inicio)
             if fim:    q = q.lte("data_fabricacao", fim)
@@ -2836,9 +2834,9 @@ elif pagina_selecionada == "🏭 Produção":
         df["cord_outros"] = df["peso_aco_protendido"].where(df["tipo_produto"] == "Outros", 0)
         return df
 
-    @st.cache_data(ttl=600)
+    @st.cache_data(ttl=900)
     def carregar_transporte_prod(inicio, fim):
-        rows, page, size = [], 0, 1000
+        rows, page, size = [], 0, 5000
         q = (supabase.table("producao_transporte")
              .select("obra_id, produto, etapa, volume_real, data_expedicao"))
         if inicio: q = q.gte("data_expedicao", inicio)
@@ -2854,9 +2852,9 @@ elif pagina_selecionada == "🏭 Produção":
         df["mes"] = pd.to_datetime(df["data_expedicao"], errors="coerce").dt.to_period("M").astype(str)
         return df
 
-    @st.cache_data(ttl=600)
+    @st.cache_data(ttl=900)
     def carregar_montagem_prod(inicio, fim):
-        rows, page, size = [], 0, 1000
+        rows, page, size = [], 0, 5000
         q = (supabase.table("producao_montagem")
              .select("obra_id, peca, produto, etapa, volume_total, data_montagem"))
         if inicio: q = q.gte("data_montagem", inicio)
@@ -2872,10 +2870,10 @@ elif pagina_selecionada == "🏭 Produção":
         df["mes"] = pd.to_datetime(df["data_montagem"], errors="coerce").dt.to_period("M").astype(str)
         return df
 
-    @st.cache_data(ttl=600)
+    @st.cache_data(ttl=900)
     def carregar_patio(inicio, fim):
         """Carrega peca+obra+datas para calcular prazo de pátio (fab → expedição)."""
-        rows_f, page, size = [], 0, 1000
+        rows_f, page, size = [], 0, 5000
         qf = supabase.table("producao_fabricacao").select("obra_id, peca, data_fabricacao")
         if inicio: qf = qf.gte("data_fabricacao", inicio)
         if fim:    qf = qf.lte("data_fabricacao", fim)
@@ -2907,7 +2905,7 @@ elif pagina_selecionada == "🏭 Produção":
         merged["dias_patio"] = (merged["data_expedicao"] - merged["data_fabricacao"]).dt.days
         return merged[merged["dias_patio"] >= 0].copy()
 
-    @st.cache_data(ttl=600)
+    @st.cache_data(ttl=900)
     def carregar_custos_prod():
         """Carrega custos com conta_gerencial para análise de eficiência R$/m³."""
         rows, page, size = [], 0, 1000
@@ -3548,10 +3546,10 @@ elif pagina_selecionada == "🏭 Produção":
         st.markdown("#### 📊 Benchmark kg aço/m³ por produto")
         if not df_fab_f.empty:
             # Carregar todos os dados históricos (sem filtro temporal) para média
-            @st.cache_data(ttl=600)
+            @st.cache_data(ttl=900)
             def carregar_fabricacao_historico():
                 def _q(cols):
-                    rows, page, size = [], 0, 1000
+                    rows, page, size = [], 0, 5000
                     q = supabase.table("producao_fabricacao").select(cols)
                     while True:
                         resp = q.range(page * size, (page + 1) * size - 1).execute()
@@ -3741,10 +3739,6 @@ elif pagina_selecionada == "🏭 Produção":
 # PÁGINA: JORNADA DA OBRA (VISÃO MACRO E GANTT)
 # ==========================================================
 elif pagina_selecionada == "🛤️ Jornada da Obra":
-    import pandas as pd
-    from datetime import date
-    import plotly.express as px
-    import plotly.graph_objects as go
 
     st.header("🛤️ Jornada do Contrato e Marcos")
 
@@ -4067,28 +4061,25 @@ elif pagina_selecionada == "🛤️ Jornada da Obra":
 # PÁGINA: ANÁLISE DA OBRA (DASHBOARD INTEGRADO)
 # ==========================================================
 elif pagina_selecionada == "🔍 Análise da Obra":
-    import pandas as pd
-    import plotly.express as px
-    from datetime import date
 
     st.header("🔍 Análise da Obra")
 
     # ── CACHE FUNCTIONS ──────────────────────────────────────
-    @st.cache_data(ttl=60)
+    @st.cache_data(ttl=300)
     def _jornada_analise(obra_id):
         resp = supabase.table("obra_jornada")\
             .select("*, template:jornada_template(*)")\
             .eq("obra_id", obra_id).execute()
         return sorted(resp.data, key=lambda x: x["template"]["ordem"]) if resp.data else []
 
-    @st.cache_data(ttl=60)
+    @st.cache_data(ttl=300)
     def _marcos_analise(obra_id):
         resp = supabase.table("obra_marcos").select("*").eq("obra_id", obra_id).execute()
         return resp.data[0] if resp.data else {}
 
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=600)
     def _fab_obra(obra_id):
-        rows, page, size = [], 0, 1000
+        rows, page, size = [], 0, 5000
         q = supabase.table("producao_fabricacao")\
             .select("peca, produto, volume_teorico, data_fabricacao")\
             .eq("obra_id", obra_id)
@@ -4103,9 +4094,9 @@ elif pagina_selecionada == "🔍 Análise da Obra":
             df["data_fabricacao"] = pd.to_datetime(df["data_fabricacao"], errors="coerce")
         return df
 
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=600)
     def _exp_obra(obra_id):
-        rows, page, size = [], 0, 1000
+        rows, page, size = [], 0, 5000
         q = supabase.table("producao_transporte")\
             .select("produto, volume_real, data_expedicao")\
             .eq("obra_id", obra_id)
@@ -4120,9 +4111,9 @@ elif pagina_selecionada == "🔍 Análise da Obra":
             df["data_expedicao"] = pd.to_datetime(df["data_expedicao"], errors="coerce")
         return df
 
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=600)
     def _mont_obra(obra_id):
-        rows, page, size = [], 0, 1000
+        rows, page, size = [], 0, 5000
         q = supabase.table("producao_montagem")\
             .select("produto, volume_teorico, data_montagem")\
             .eq("obra_id", obra_id)
@@ -4137,7 +4128,7 @@ elif pagina_selecionada == "🔍 Análise da Obra":
             df["data_montagem"] = pd.to_datetime(df["data_montagem"], errors="coerce")
         return df
 
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=600)
     def _medicoes_obra(obra_id):
         try:
             rows, page, size = [], 0, 1000
@@ -4157,7 +4148,7 @@ elif pagina_selecionada == "🔍 Análise da Obra":
         except Exception:
             return pd.DataFrame()
 
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=600)
     def _fin_obra(obra_id):
         try:
             r = supabase.table("obras").select("cod4").eq("id", obra_id).limit(1).execute()
@@ -4768,14 +4759,11 @@ Para cruzar **custos** com obras nos dashboards: `SUBSTRING(centro_custos, 1, 4)
 # FOLHA / RH
 # ==========================================================
 elif pagina_selecionada == "👷 Folha / RH":
-    import plotly.graph_objects as go
-    import plotly.express as px
-
     st.header("👷 Folha / RH")
 
     # ── FUNÇÕES DE CARGA ──────────────────────────────────────────────────────
 
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=600)
     def carregar_folha_meses():
         resp = supabase.table("folha").select("mes").execute()
         if not resp.data:
@@ -4783,7 +4771,7 @@ elif pagina_selecionada == "👷 Folha / RH":
         meses = sorted(set(r["mes"][:7] for r in resp.data if r.get("mes")), reverse=True)
         return meses
 
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=600)
     def carregar_folha_mes(mes_iso):
         rows, page, size = [], 0, 1000
         q = (supabase.table("folha").select("*")
@@ -4810,7 +4798,7 @@ elif pagina_selecionada == "👷 Folha / RH":
                 df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
         return df
 
-    @st.cache_data(ttl=300)
+    @st.cache_data(ttl=600)
     def carregar_folha_historico():
         rows, page, size = [], 0, 1000
         q = supabase.table("folha").select(
@@ -5175,4 +5163,1254 @@ elif pagina_selecionada == "👷 Folha / RH":
                 f"Proventos: {fmt_brl(df_det_show['proventos'].sum())} | "
                 f"HE: {fmt_brl(df_det_show['soma_hes'].sum())} | "
                 f"Custo Total: {fmt_brl(df_det_show['valor_funcionario'].sum())}"
+            )
+
+# ==========================================================
+# CUSTOS & DESPESAS
+# ==========================================================
+elif pagina_selecionada == "💸 Custos & Despesas":
+
+    # ── Cores fixas por grupo ────────────────────────────────
+    _COR_GRUPO = {
+        "Pessoal":                  "#1976D2",
+        "Insumos Estruturais":      "#E53935",
+        "Materiais de Consumo":     "#FB8C00",
+        "Serviços PJ":              "#43A047",
+        "Logística":                "#7B1FA2",
+        "Benefícios":               "#00ACC1",
+        "Peças e Manutenção":       "#F57F17",
+        "Energia e Infraestrutura": "#546E7A",
+        "Outros":                   "#9E9E9E",
+    }
+    _COR_TIPO = {
+        "Direto (Obra)":      "#1976D2",
+        "Indireto (Fábrica)": "#43A047",
+        "Equipamento":        "#FB8C00",
+        "Outros":             "#9E9E9E",
+    }
+    _COR_TRIB = {
+        "Previdência (INSS)":        "#1976D2",
+        "FGTS":                      "#43A047",
+        "IR/IRRF":                   "#E53935",
+        "Contribuições Sociais":     "#FB8C00",
+        "Taxas e Licenças":          "#7B1FA2",
+        "Previdência Social (GPS)":  "#00ACC1",
+        "Outros Tributos":           "#9E9E9E",
+    }
+
+    # ── Mapeamento conta_gerencial → grupo_custo ─────────────
+    _MAP_GRUPO = {
+        "CIMENTO":                              "Insumos Estruturais",
+        "AÇO PARA ESTRUTURAS":                  "Insumos Estruturais",
+        "CORDOALHA":                            "Insumos Estruturais",
+        "AREIA NATURAL":                        "Insumos Estruturais",
+        "PEDRAS BRITADAS":                      "Insumos Estruturais",
+        "ADITIVO":                              "Insumos Estruturais",
+        "METACAULIM":                           "Insumos Estruturais",
+        "MINÉRIO NÃO REAGIDO":                  "Insumos Estruturais",
+        "MATERIAIS DE CONSUMO":                 "Materiais de Consumo",
+        "PEÇAS E ACESSÓRIOS":                   "Peças e Manutenção",
+        "FERRAMENTAS E UTENSÍLIOS":             "Peças e Manutenção",
+        "PEÇAS DE DESGASTE":                    "Peças e Manutenção",
+        "GASES E ELETRODOS":                    "Peças e Manutenção",
+        "LUBRIFICANTES":                        "Peças e Manutenção",
+        "PNEUS E CÂMARAS":                      "Peças e Manutenção",
+        "SERVIÇOS DE MANUTENÇÃO DE EQUIP. PJ":  "Peças e Manutenção",
+        "SALARIOS":                             "Pessoal",
+        "INSS S/ FOLHA":                        "Pessoal",
+        "INSS FOLHA":                           "Pessoal",
+        "FGTS":                                 "Pessoal",
+        "HORAS EXTRAS":                         "Pessoal",
+        "FERIAS":                               "Pessoal",
+        "DECIMO TERCEIRO  SALARIO":             "Pessoal",
+        "ADICIONAL NOTURNO":                    "Pessoal",
+        "ADICIONAL DE PERICULOSIDADE":          "Pessoal",
+        "13 SALARIO INDENIZADO":                "Pessoal",
+        "FERIAS INDENIZADAS":                   "Pessoal",
+        "AVISO PREVIO INDENIZADO":              "Pessoal",
+        "FGTS RESCISÃO":                        "Pessoal",
+        "PRODUTIVIDADE":                        "Pessoal",
+        "1/3 FERIAS":                           "Pessoal",
+        "ABONO PECUNIARIO DE FERIAS":           "Pessoal",
+        "1/3 ABONO PECUNIARIO DE FERIAS":       "Pessoal",
+        "ANUENIO":                              "Pessoal",
+        "MULTA ART 480":                        "Pessoal",
+        "ALIMENTAÇÃO":                          "Benefícios",
+        "ALIMENTACAO":                          "Benefícios",
+        "ASSISTÊNCIA MÉDICA":                   "Benefícios",
+        "ASSISTENCIA MEDICA/ODONTOLOGICA":      "Benefícios",
+        "SEGURO DE VIDA":                       "Benefícios",
+        "VALE-TRANSPORTE":                      "Benefícios",
+        "TRANSPORTE DE FUNCIONARIOS":           "Benefícios",
+        "CESTAS BASICAS":                       "Benefícios",
+        "EXAMES OCUPACIONAIS":                  "Benefícios",
+        "FARDAMENTO E EQUIPAMENTO DE SEGURANÇA": "Benefícios",
+        "ESTAGIARIOS":                          "Benefícios",
+        "OUTROS SERVIÇOS PJ":                   "Serviços PJ",
+        "SERVIÇOS PJ PARA PRODUÇÃO":            "Serviços PJ",
+        "LOCAÇÕES PJ":                          "Serviços PJ",
+        "SERVIÇOS TÉCNICOS":                    "Serviços PJ",
+        "SERVIÇOS DE CONSULTORIAS PJ":          "Serviços PJ",
+        "SERVIÇOS DE DESENV./SUPORTE DE SISTEMAS": "Serviços PJ",
+        "SERVIÇOS DE CONSERVAÇÃO E LIMPEZA PJ": "Serviços PJ",
+        "FRETE PJ":                             "Logística",
+        "FRETE PJ PARA CLIENTES":               "Logística",
+        "COMBUSTÍVEIS":                         "Logística",
+        "PEDÁGIOS/ESTACIONAMENTOS/CONDUÇÕES":   "Logística",
+        "ENERGIA ELÉTRICA":                     "Energia e Infraestrutura",
+        "DEPRECIAÇÕES":                         "Energia e Infraestrutura",
+        "DEPRECIACOES":                         "Energia e Infraestrutura",
+        "MATERIAIS APLICADOS EM REFORMAS":      "Energia e Infraestrutura",
+    }
+
+    def _enriquecer_df(df):
+        """Adiciona colunas derivadas: mes, ano, cod4, tipo_centro, grupo_custo.
+        Totalmente vetorizado — sem apply() linha a linha."""
+        df = df.copy()
+        df["data"]         = pd.to_datetime(df["data"], errors="coerce")
+        df["valor_global"] = pd.to_numeric(df["valor_global"], errors="coerce").abs()
+        df["mes"]          = df["data"].dt.to_period("M").astype(str)
+        df["ano"]          = df["data"].dt.year.astype(str)
+
+        # cod4: extrai 4 primeiros dígitos do centro_custos via regex vetorizado
+        cc = df["centro_custos"].fillna("").astype(str).str.strip()
+        df["cod4"] = cc.str.extract(r"^(\d{4})", expand=False)
+
+        # tipo_centro: vetorizado com np.select (ordem de prioridade)
+        cc_up = cc.str.upper()
+        cond_direto = df["cod4"].notna()
+        cond_equip  = cc_up.str.contains(
+            "CAMINHÃO|CAMINHAO|PÓRTICO|PORTICO|RETROESCAVADEIRA|"
+            "BETONEIRA|MUNCK|MÁQUINA|MAQUINA|CENTRAL DE CONCRETO",
+            regex=True, na=False)
+        cond_indir  = cc_up.str.contains(
+            "PRODUÇÃO|PRODUCAO|LABORATÓRIO|LABORATORIO|MONTAGEM|MANUTENÇÃO|MANUTENCAO",
+            regex=True, na=False)
+        df["tipo_centro"] = np.select(
+            [cond_direto, cond_equip, cond_indir],
+            ["Direto (Obra)", "Equipamento", "Indireto (Fábrica)"],
+            default="Outros"
+        )
+
+        # grupo_custo: map direto pelo dicionário (O(n) hash lookup, sem loop Python)
+        df["grupo_custo"] = (df["conta_gerencial"]
+                             .fillna("").astype(str)
+                             .str.upper().str.strip()
+                             .map(_MAP_GRUPO)
+                             .fillna("Outros"))
+        return df
+
+    # ── Colunas necessárias (evita SELECT * em tabelas grandes) ──
+    _COLS_CUSTOS = ("data, id_lancamento, numero_doc, centro_custos, conta_macro,"
+                    " conta_gerencial, cli_fornecedor, produto_servico, criado_por,"
+                    " valor_global, qtd, preco_unitario, origem, chave_coligada, cod_tipo_doc")
+
+    # ── Funções de carga ─────────────────────────────────────
+    @st.cache_data(ttl=600)
+    def carregar_custos_dashboard():
+        rows, page, size = [], 0, 5000
+        while True:
+            resp = (supabase.table("custos").select(_COLS_CUSTOS)
+                    .range(page * size, (page + 1) * size - 1).execute())
+            rows.extend(resp.data)
+            if len(resp.data) < size:
+                break
+            page += 1
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        df = df.dropna(subset=["data"])
+        return _enriquecer_df(df)
+
+    @st.cache_data(ttl=600)
+    def carregar_despesas_dashboard():
+        rows, page, size = [], 0, 5000
+        while True:
+            resp = (supabase.table("despesas").select(_COLS_CUSTOS)
+                    .range(page * size, (page + 1) * size - 1).execute())
+            rows.extend(resp.data)
+            if len(resp.data) < size:
+                break
+            page += 1
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        df = df.dropna(subset=["data"])
+        return _enriquecer_df(df)
+
+    @st.cache_data(ttl=600)
+    def carregar_receitas_dashboard():
+        rows, page, size = [], 0, 5000
+        while True:
+            resp = (supabase.table("receitas")
+                    .select("data, centro_custos, cli_fornecedor, valor_global,"
+                            " conta_gerencial, descricao, cod_tipo_doc")
+                    .range(page * size, (page + 1) * size - 1).execute())
+            rows.extend(resp.data)
+            if len(resp.data) < size:
+                break
+            page += 1
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        df["data"]         = pd.to_datetime(df["data"], errors="coerce")
+        df["valor_global"] = pd.to_numeric(df["valor_global"], errors="coerce")
+        df["mes"]          = df["data"].dt.to_period("M").astype(str)
+        df["ano"]          = df["data"].dt.year.astype(str)
+        df["cod4"]         = (df["centro_custos"].fillna("").astype(str)
+                              .str.extract(r"^(\d{4})", expand=False))
+        return df
+
+    @st.cache_data(ttl=600)
+    def carregar_medicoes_faturamento():
+        rows, page, size = [], 0, 5000
+        while True:
+            resp = (supabase.table("medicoes")
+                    .select("obra_id, data_emissao, tipo, valor, descricao")
+                    .range(page * size, (page + 1) * size - 1).execute())
+            rows.extend(resp.data)
+            if len(resp.data) < size:
+                break
+            page += 1
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+        df = df[~df["tipo"].isin(["NOTA FISCAL CANCELADA", "NOTA FISCAL REMESSA"])]
+        df["valor"]        = pd.to_numeric(df["valor"], errors="coerce")
+        df["data_emissao"] = pd.to_datetime(df["data_emissao"], errors="coerce")
+        df["mes"]          = df["data_emissao"].dt.to_period("M").astype(str)
+        return df
+
+    @st.cache_data(ttl=300)
+    def carregar_producao_mensal():
+        rows, page, size = [], 0, 5000
+        while True:
+            resp = (supabase.table("producao_fabricacao")
+                    .select("data_fabricacao, volume_teorico")
+                    .range(page * size, (page + 1) * size - 1).execute())
+            rows.extend(resp.data)
+            if len(resp.data) < size:
+                break
+            page += 1
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return pd.Series(dtype=float)
+        df["volume_teorico"] = pd.to_numeric(df["volume_teorico"], errors="coerce").fillna(0)
+        df["mes"] = pd.to_datetime(df["data_fabricacao"], errors="coerce").dt.to_period("M").astype(str)
+        return df.groupby("mes")["volume_teorico"].sum()
+
+    def _limpar_caches_custos():
+        for fn in [carregar_custos_dashboard, carregar_despesas_dashboard,
+                   carregar_receitas_dashboard, carregar_medicoes_faturamento,
+                   carregar_producao_mensal]:
+            try:
+                fn.clear()
+            except Exception:
+                pass
+
+    # ── Cabeçalho ────────────────────────────────────────────
+    h1, h2 = st.columns([8, 1])
+    h1.header("💸 Custos & Despesas")
+    if h2.button("🔄", key="cd_refresh", help="Atualizar dados"):
+        _limpar_caches_custos()
+        st.rerun()
+
+    # ── Carga dos dados ──────────────────────────────────────
+    with st.spinner("Carregando dados..."):
+        df_cus = carregar_custos_dashboard()
+        df_des = carregar_despesas_dashboard()
+        df_rec = carregar_receitas_dashboard()
+
+    if df_cus.empty and df_des.empty:
+        st.warning("Nenhum dado encontrado nas tabelas custos/despesas.")
+        st.stop()
+
+    if not df_cus.empty:
+        df_cus["origem"] = "Custo"
+    if not df_des.empty:
+        df_des["origem"] = "Despesa"
+
+    _cols_comuns = ["data","mes","ano","cod4","centro_custos","conta_gerencial",
+                    "conta_macro","cli_fornecedor","produto_servico","criado_por",
+                    "valor_global","origem","tipo_centro","grupo_custo",
+                    "cod_tipo_doc","id_lancamento"]
+    def _sel_cols(df, cols):
+        return df[[c for c in cols if c in df.columns]]
+
+    df_all = pd.concat(
+        [_sel_cols(df_cus, _cols_comuns), _sel_cols(df_des, _cols_comuns)],
+        ignore_index=True
+    )
+
+    # ── Filtros globais ──────────────────────────────────────
+    flt1, flt2, flt3, flt4, flt5 = st.columns([2, 2, 2, 2, 1])
+
+    with flt1:
+        _tipo_periodo = st.radio("Período", ["Predefinido", "Personalizado"],
+                                 horizontal=True, key="cd_tipo_periodo")
+        if _tipo_periodo == "Predefinido":
+            _pred = st.selectbox("", ["Últimos 6 meses", "Últimos 12 meses",
+                                      "Últimos 24 meses", "Todo o período"],
+                                 index=1, key="cd_pred_periodo",
+                                 label_visibility="collapsed")
+            _hoje = date.today()
+            if _pred == "Últimos 6 meses":
+                _dt_ini = _hoje - timedelta(days=182)
+            elif _pred == "Últimos 12 meses":
+                _dt_ini = _hoje - timedelta(days=365)
+            elif _pred == "Últimos 24 meses":
+                _dt_ini = _hoje - timedelta(days=730)
+            else:
+                _dt_ini = None
+            _dt_fim = _hoje
+        else:
+            _intervalo = st.date_input("Intervalo", value=(), key="cd_intervalo")
+            _dt_ini = _intervalo[0] if len(_intervalo) > 0 else None
+            _dt_fim = _intervalo[1] if len(_intervalo) > 1 else None
+
+    with flt2:
+        _origens_sel = st.multiselect("Origem", ["Custo", "Despesa"],
+                                      default=["Custo", "Despesa"], key="cd_origem")
+
+    with flt3:
+        _tipos_centro_sel = st.multiselect(
+            "Tipo de Centro",
+            ["Direto (Obra)", "Indireto (Fábrica)", "Equipamento", "Outros"],
+            default=["Direto (Obra)", "Indireto (Fábrica)", "Equipamento", "Outros"],
+            key="cd_tipo_centro"
+        )
+
+    with flt4:
+        _grupos_sel = st.multiselect(
+            "Grupo de Custo",
+            list(_COR_GRUPO.keys()),
+            default=list(_COR_GRUPO.keys()),
+            key="cd_grupo"
+        )
+
+    with flt5:
+        _cod4s_disp = sorted(df_all["cod4"].dropna().unique().tolist())
+        _obra_sel = st.selectbox("Obra", ["Todas"] + _cod4s_disp, key="cd_obra")
+
+    # Aplicar filtros
+    df_fil = df_all.copy()
+    if _dt_ini:
+        df_fil = df_fil[df_fil["data"] >= pd.Timestamp(_dt_ini)]
+    if _dt_fim:
+        df_fil = df_fil[df_fil["data"] <= pd.Timestamp(_dt_fim)]
+    if _origens_sel:
+        df_fil = df_fil[df_fil["origem"].isin(_origens_sel)]
+    if _tipos_centro_sel:
+        df_fil = df_fil[df_fil["tipo_centro"].isin(_tipos_centro_sel)]
+    if _grupos_sel:
+        df_fil = df_fil[df_fil["grupo_custo"].isin(_grupos_sel)]
+    if _obra_sel != "Todas":
+        df_fil = df_fil[df_fil["cod4"] == _obra_sel]
+        st.info(f"Modo drill-through ativo para obra **{_obra_sel}**")
+
+    if df_fil.empty:
+        st.warning("Nenhum registro encontrado com os filtros aplicados.")
+        st.stop()
+
+    # ── KPIs globais ─────────────────────────────────────────
+    _tot      = df_fil["valor_global"].sum()
+    _dir      = df_fil.loc[df_fil["tipo_centro"] == "Direto (Obra)", "valor_global"].sum()
+    _indir    = df_fil.loc[df_fil["tipo_centro"] == "Indireto (Fábrica)", "valor_global"].sum()
+    _equip    = df_fil.loc[df_fil["tipo_centro"] == "Equipamento", "valor_global"].sum()
+    _desp_adm = df_fil.loc[df_fil["origem"] == "Despesa", "valor_global"].sum()
+    _pct_dir  = (_dir / _tot * 100) if _tot > 0 else 0
+
+    kc1, kc2, kc3, kc4, kc5, kc6 = st.columns(6)
+    kc1.metric("💰 Custo Total",        fmt_brl(_tot))
+    kc2.metric("🏗️ Direto",             fmt_brl(_dir))
+    kc3.metric("🏭 Indireto (Fábrica)", fmt_brl(_indir))
+    kc4.metric("🚛 Equipamentos",        fmt_brl(_equip))
+    kc5.metric("📋 Despesas ADM",        fmt_brl(_desp_adm))
+    kc6.metric("% Direto",              f"{_pct_dir:.1f}%")
+
+    # ── Abas ─────────────────────────────────────────────────
+    aba1, aba2, aba3, aba4, aba5, aba6 = st.tabs([
+        "📊 Visão Geral",
+        "📈 Curva ABC",
+        "🔍 Padrão & Anomalias",
+        "🔄 Faturamento Direto",
+        "📐 Custo por m³",
+        "⚖️ Tributos",
+    ])
+
+    # ── Componente drill-through ─────────────────────────────
+    def _drill_through(df, titulo):
+        st.divider()
+        st.markdown(f"#### 🔍 Drill-Through: {titulo}")
+        dc1, dc2, dc3 = st.columns(3)
+        _busca_for = dc1.text_input("Buscar fornecedor", key=f"cd_dt_for_{titulo[:10]}")
+        _contas    = ["Todas"] + sorted(df["conta_gerencial"].dropna().unique().tolist())
+        _fil_cg    = dc2.selectbox("Conta Gerencial", _contas, key=f"cd_dt_cg_{titulo[:10]}")
+        _meses_dt  = ["Todos"] + sorted(df["mes"].dropna().unique().tolist(), reverse=True)
+        _fil_mes   = dc3.selectbox("Mês", _meses_dt, key=f"cd_dt_mes_{titulo[:10]}")
+
+        df_dt = df.copy()
+        if _busca_for:
+            df_dt = df_dt[df_dt["cli_fornecedor"].fillna("").str.upper()
+                          .str.contains(_busca_for.upper(), na=False)]
+        if _fil_cg != "Todas":
+            df_dt = df_dt[df_dt["conta_gerencial"] == _fil_cg]
+        if _fil_mes != "Todos":
+            df_dt = df_dt[df_dt["mes"] == _fil_mes]
+
+        _cols_dt = ["data","centro_custos","conta_gerencial","cli_fornecedor",
+                    "produto_servico","criado_por","valor_global"]
+        _cols_dt_ok = [c for c in _cols_dt if c in df_dt.columns]
+        df_dt_show = df_dt[_cols_dt_ok].rename(columns={
+            "data":            "Data",
+            "centro_custos":   "Centro de Custo",
+            "conta_gerencial": "Conta Gerencial",
+            "cli_fornecedor":  "Fornecedor",
+            "produto_servico": "Produto/Serviço",
+            "criado_por":      "Criado Por",
+            "valor_global":    "Valor (R$)",
+        })
+        st.dataframe(df_dt_show, use_container_width=True, hide_index=True,
+                     height=max(300, min(600, 36 + 35 * len(df_dt_show))))
+        st.caption(f"**{len(df_dt_show)}** lançamentos · Total: {fmt_brl(df_dt['valor_global'].sum())}")
+
+    # ════════════════════════════════════════════════════════
+    # ABA 1 — Visão Geral
+    # ════════════════════════════════════════════════════════
+    with aba1:
+        # Bloco A — Evolução mensal empilhada
+        st.subheader("Evolução Mensal por Grupo")
+        _ev = (df_fil.groupby(["mes","grupo_custo"])["valor_global"]
+               .sum().reset_index())
+        _ev_tot = df_fil.groupby("mes")["valor_global"].sum().reset_index()
+        _ev_tot.columns = ["mes","total"]
+
+        _meses_ord = sorted(_ev["mes"].unique())
+        fig_ev = go.Figure()
+        for _grp, _cor in _COR_GRUPO.items():
+            _d = _ev[_ev["grupo_custo"] == _grp]
+            if _d.empty:
+                continue
+            _d = _d.set_index("mes").reindex(_meses_ord, fill_value=0).reset_index()
+            fig_ev.add_trace(go.Bar(
+                x=_d["mes"], y=_d["valor_global"],
+                name=_grp, marker_color=_cor,
+                hovertemplate=f"<b>{_grp}</b><br>%{{x}}<br>R$ %{{y:,.0f}}<extra></extra>"
+            ))
+        _ev_tot_ord = _ev_tot.set_index("mes").reindex(_meses_ord, fill_value=0).reset_index()
+        fig_ev.add_trace(go.Scatter(
+            x=_ev_tot_ord["mes"], y=_ev_tot_ord["total"],
+            name="Total", mode="lines+markers",
+            line=dict(color="#212121", width=2, dash="dot"),
+            yaxis="y2",
+            hovertemplate="<b>Total</b><br>%{x}<br>R$ %{y:,.0f}<extra></extra>"
+        ))
+        fig_ev.update_layout(
+            barmode="stack", hovermode="x unified", height=380,
+            yaxis=dict(title="R$"),
+            yaxis2=dict(title="Total", overlaying="y", side="right", showgrid=False),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+            margin=dict(t=40, b=40)
+        )
+        st.plotly_chart(fig_ev, use_container_width=True)
+
+        # Bloco B — Mapa de calor de sazonalidade
+        st.subheader("Sazonalidade Mensal")
+        _heat = df_fil.copy()
+        _heat["mes_num"] = _heat["data"].dt.month
+        _heat["ano_str"] = _heat["data"].dt.year.astype(str)
+        _pivot = _heat.pivot_table(index="ano_str", columns="mes_num",
+                                   values="valor_global", aggfunc="sum")
+        _meses_pt = {1:"Jan",2:"Fev",3:"Mar",4:"Abr",5:"Mai",6:"Jun",
+                     7:"Jul",8:"Ago",9:"Set",10:"Out",11:"Nov",12:"Dez"}
+        _pivot.columns = [_meses_pt.get(c, str(c)) for c in _pivot.columns]
+        _n_anos = len(_pivot)
+        fig_heat = px.imshow(
+            _pivot, text_auto=".2s",
+            color_continuous_scale=["#43A047","#FFEE58","#E53935"],
+            aspect="auto"
+        )
+        fig_heat.update_layout(height=max(180, min(70 * _n_anos, 500)),
+                                margin=dict(t=20, b=20))
+        st.plotly_chart(fig_heat, use_container_width=True)
+
+        # Bloco C — Donuts
+        st.subheader("Composição")
+        dc1, dc2 = st.columns(2)
+        with dc1:
+            _grp_vals = df_fil.groupby("grupo_custo")["valor_global"].sum()
+            fig_d1 = go.Figure(go.Pie(
+                labels=_grp_vals.index, values=_grp_vals.values,
+                hole=0.42,
+                marker_colors=[_COR_GRUPO.get(g, "#9E9E9E") for g in _grp_vals.index],
+                textinfo="label+percent"
+            ))
+            fig_d1.update_layout(title="Por Grupo de Custo", height=350,
+                                  margin=dict(t=40, b=10))
+            st.plotly_chart(fig_d1, use_container_width=True)
+        with dc2:
+            _tc_vals = df_fil.groupby("tipo_centro")["valor_global"].sum()
+            fig_d2 = go.Figure(go.Pie(
+                labels=_tc_vals.index, values=_tc_vals.values,
+                hole=0.42,
+                marker_colors=[_COR_TIPO.get(g, "#9E9E9E") for g in _tc_vals.index],
+                textinfo="label+percent"
+            ))
+            fig_d2.update_layout(title="Por Tipo de Centro", height=350,
+                                  margin=dict(t=40, b=10))
+            st.plotly_chart(fig_d2, use_container_width=True)
+
+        if _obra_sel != "Todas":
+            _drill_through(df_fil, f"Obra {_obra_sel}")
+
+    # ════════════════════════════════════════════════════════
+    # ABA 2 — Curva ABC
+    # ════════════════════════════════════════════════════════
+    with aba2:
+        _dim_abc = st.radio(
+            "Dimensão de análise",
+            ["Por Fornecedor", "Por Conta Gerencial", "Por Centro de Custo"],
+            horizontal=True, key="cd_dim_abc"
+        )
+        _col_abc = {"Por Fornecedor": "cli_fornecedor",
+                    "Por Conta Gerencial": "conta_gerencial",
+                    "Por Centro de Custo": "centro_custos"}[_dim_abc]
+
+        _abc = (df_fil.groupby(_col_abc, dropna=False)["valor_global"]
+                .sum().reset_index()
+                .rename(columns={_col_abc: "nome", "valor_global": "valor"})
+                .sort_values("valor", ascending=False).reset_index(drop=True))
+        _tot_abc = _abc["valor"].sum()
+        _abc["pct_individual"] = _abc["valor"] / _tot_abc * 100
+        _abc["pct_acumulado"]  = _abc["pct_individual"].cumsum()
+        _abc["classe_abc"]     = _abc["pct_acumulado"].apply(
+            lambda x: "A" if x <= 80 else ("B" if x <= 95 else "C"))
+        _abc["Rank"] = range(1, len(_abc) + 1)
+        _abc_top = _abc.head(30)
+
+        # KPIs
+        _n_a   = (_abc["classe_abc"] == "A").sum()
+        _pct_a = _abc.loc[_abc["classe_abc"] == "A", "valor"].sum() / _tot_abc * 100 if _tot_abc else 0
+        _top1  = _abc.iloc[0] if len(_abc) > 0 else None
+        _top5_pct = _abc.head(5)["valor"].sum() / _tot_abc * 100 if _tot_abc else 0
+
+        ka1, ka2, ka3, ka4 = st.columns(4)
+        ka1.metric(f"Itens Classe A", str(_n_a))
+        ka2.metric("% total na classe A", f"{_pct_a:.1f}%")
+        if _top1 is not None:
+            ka3.metric("Maior item", f"{str(_top1['nome'])[:25]}",
+                       delta=f"{_top1['pct_individual']:.1f}% do total")
+        ka4.metric("Concentração Top-5", f"{_top5_pct:.1f}%")
+
+        # Gráfico ABC
+        _cores_abc = {"A":"#E53935","B":"#FB8C00","C":"#43A047"}
+        fig_abc = go.Figure()
+        fig_abc.add_trace(go.Bar(
+            x=_abc_top["valor"], y=_abc_top["nome"],
+            orientation="h",
+            marker_color=[_cores_abc.get(c,"#9E9E9E") for c in _abc_top["classe_abc"]],
+            name="Valor",
+            hovertemplate="<b>%{y}</b><br>R$ %{x:,.0f}<extra></extra>"
+        ))
+        fig_abc.add_trace(go.Scatter(
+            x=_abc_top["pct_acumulado"], y=_abc_top["nome"],
+            mode="lines+markers", name="% Acumulado",
+            line=dict(color="#616161", dash="dash"),
+            xaxis="x2",
+            hovertemplate="%{y}<br>%{x:.1f}%<extra></extra>"
+        ))
+        fig_abc.add_hline(y=None, secondary_y=False)
+        fig_abc.update_layout(
+            height=500, hovermode="y unified",
+            xaxis=dict(title="Valor (R$)"),
+            xaxis2=dict(title="% Acumulado", overlaying="x", side="top",
+                        range=[0,100], showgrid=False),
+            yaxis=dict(autorange="reversed"),
+            margin=dict(t=50, b=40)
+        )
+        fig_abc.add_vline(x=80, line_dash="dot", line_color="#E53935",
+                          annotation_text="80% (A)", xref="x2")
+        fig_abc.add_vline(x=95, line_dash="dot", line_color="#FB8C00",
+                          annotation_text="95% (B)", xref="x2")
+        st.plotly_chart(fig_abc, use_container_width=True)
+
+        # Tabela ABC
+        st.subheader("Tabela Completa")
+        _abc_show = _abc.rename(columns={
+            "nome":"Nome","valor":"Valor (R$)",
+            "pct_individual":"% Individual","pct_acumulado":"% Acumulado",
+            "classe_abc":"Classe"
+        })[["Rank","Nome","Valor (R$)","% Individual","% Acumulado","Classe"]]
+        _sel_abc = st.dataframe(
+            _abc_show, use_container_width=True, hide_index=True,
+            on_select="rerun", selection_mode="single-row",
+            column_config={
+                "Valor (R$)":    st.column_config.NumberColumn(format="R$ %.0f"),
+                "% Individual":  st.column_config.NumberColumn(format="%.1f%%"),
+                "% Acumulado":   st.column_config.NumberColumn(format="%.1f%%"),
+            }
+        )
+        _sel_rows_abc = _sel_abc.selection.rows if hasattr(_sel_abc, "selection") else []
+        if _sel_rows_abc:
+            _item_sel = _abc.iloc[_sel_rows_abc[0]]["nome"]
+            st.session_state["custos_drill_item"]    = _item_sel
+            st.session_state["custos_drill_dimensao"] = _col_abc
+            _df_drill = df_fil[df_fil[_col_abc].fillna("").astype(str) == str(_item_sel)]
+            _drill_through(_df_drill, str(_item_sel))
+
+    # ════════════════════════════════════════════════════════
+    # ABA 3 — Padrão & Anomalias
+    # ════════════════════════════════════════════════════════
+    with aba3:
+        # Bloco A — Detector de anomalias
+        st.subheader("Detector de Anomalias por Conta Gerencial")
+        _anom_rows = []
+        _mes_rec = df_fil["mes"].max()
+        for _cg in df_fil["conta_gerencial"].dropna().unique():
+            _sub = df_fil[df_fil["conta_gerencial"] == _cg].groupby("mes")["valor_global"].sum()
+            if len(_sub) < 2:
+                continue
+            _med = _sub.mean()
+            _std = _sub.std()
+            _ult = _sub.get(_mes_rec, None)
+            if _ult is None or _std == 0:
+                continue
+            _sig = (_ult - _med) / _std
+            _status = ("🔴 Anomalia" if abs(_sig) > 2 else
+                       "🟡 Atenção" if abs(_sig) > 1 else "🟢 Normal")
+            _anom_rows.append({
+                "Conta Gerencial": _cg,
+                "Média Mensal (R$)": _med,
+                "Último Mês (R$)": _ult,
+                "Δ vs Média": _ult - _med,
+                "Desvio (σ)": round(_sig, 2),
+                "Status": _status,
+                "_abs_sig": abs(_sig),
+            })
+        if _anom_rows:
+            _df_anom = pd.DataFrame(_anom_rows).sort_values("_abs_sig", ascending=False).drop(columns=["_abs_sig"])
+            st.dataframe(_df_anom, use_container_width=True, hide_index=True,
+                         column_config={
+                             "Média Mensal (R$)": st.column_config.NumberColumn(format="R$ %.0f"),
+                             "Último Mês (R$)":   st.column_config.NumberColumn(format="R$ %.0f"),
+                             "Δ vs Média":         st.column_config.NumberColumn(format="R$ %.0f"),
+                         })
+        else:
+            st.info("Dados insuficientes para análise de anomalias.")
+
+        # Bloco B — Dispersão
+        st.subheader("Dispersão de Lançamentos Individuais")
+        _p95 = df_fil["valor_global"].quantile(0.95)
+        _df_disp = df_fil.copy()
+        _df_disp["_tamanho"] = _df_disp["valor_global"].apply(
+            lambda v: 12 if v >= _p95 else 5)
+        _df_disp["_cor_disp"] = _df_disp.apply(
+            lambda r: "#E53935" if r["valor_global"] >= _p95
+            else _COR_GRUPO.get(r["grupo_custo"], "#9E9E9E"), axis=1)
+
+        fig_disp = go.Figure()
+        for _grp, _cor in _COR_GRUPO.items():
+            _dd = _df_disp[(_df_disp["grupo_custo"] == _grp) & (_df_disp["valor_global"] < _p95)]
+            if _dd.empty:
+                continue
+            fig_disp.add_trace(go.Scatter(
+                x=_dd["data"], y=_dd["valor_global"],
+                mode="markers", name=_grp,
+                marker=dict(color=_cor, size=5, opacity=0.6),
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "Conta: %{customdata[1]}<br>"
+                    "Forn.: %{customdata[2]}<br>"
+                    "CC: %{customdata[3]}<br>"
+                    "Valor: R$ %{y:,.0f}<extra></extra>"
+                ),
+                customdata=_dd[["cli_fornecedor","conta_gerencial","cli_fornecedor","centro_custos"]].fillna("—").values
+            ))
+        _dd_out = _df_disp[_df_disp["valor_global"] >= _p95]
+        if not _dd_out.empty:
+            fig_disp.add_trace(go.Scatter(
+                x=_dd_out["data"], y=_dd_out["valor_global"],
+                mode="markers", name="≥ P95",
+                marker=dict(color="#E53935", size=12, symbol="diamond"),
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "Conta: %{customdata[1]}<br>"
+                    "Valor: R$ %{y:,.0f}<extra></extra>"
+                ),
+                customdata=_dd_out[["cli_fornecedor","conta_gerencial"]].fillna("—").values
+            ))
+        fig_disp.update_layout(height=380, hovermode="closest",
+                                xaxis_title="Data", yaxis_title="Valor (R$)",
+                                margin=dict(t=20, b=40))
+        st.plotly_chart(fig_disp, use_container_width=True)
+        st.caption(f"Pontos vermelhos grandes = lançamentos acima do percentil 95 (acima de {fmt_brl(_p95)})")
+
+        # Bloco C — Comparativo mês a mês
+        st.subheader("Comparativo Mês a Mês")
+        _meses_disp = sorted(df_fil["mes"].dropna().unique(), reverse=True)
+        if len(_meses_disp) >= 2:
+            cc1, cc2 = st.columns(2)
+            _mes_a = cc1.selectbox("Mês A", _meses_disp, index=0, key="cd_mes_a")
+            _mes_b = cc2.selectbox("Mês B", _meses_disp, index=1, key="cd_mes_b")
+            _df_ma = (df_fil[df_fil["mes"] == _mes_a]
+                      .groupby("conta_gerencial")["valor_global"].sum()
+                      .reset_index().rename(columns={"valor_global":"val_a"}))
+            _df_mb = (df_fil[df_fil["mes"] == _mes_b]
+                      .groupby("conta_gerencial")["valor_global"].sum()
+                      .reset_index().rename(columns={"valor_global":"val_b"}))
+            _df_comp = _df_ma.merge(_df_mb, on="conta_gerencial", how="outer").fillna(0)
+            _df_comp["Δ Valor"]   = _df_comp["val_a"] - _df_comp["val_b"]
+            _df_comp["Δ %"]       = (_df_comp["Δ Valor"] / _df_comp["val_b"].replace(0, float("nan")) * 100).fillna(0)
+            _df_comp = _df_comp.sort_values("val_a", ascending=False)
+            st.dataframe(
+                _df_comp.rename(columns={
+                    "conta_gerencial": "Conta Gerencial",
+                    "val_a": f"Mês {_mes_a} (R$)",
+                    "val_b": f"Mês {_mes_b} (R$)",
+                }),
+                use_container_width=True, hide_index=True,
+                column_config={
+                    f"Mês {_mes_a} (R$)": st.column_config.NumberColumn(format="R$ %.0f"),
+                    f"Mês {_mes_b} (R$)": st.column_config.NumberColumn(format="R$ %.0f"),
+                    "Δ Valor":             st.column_config.NumberColumn(format="R$ %.0f"),
+                    "Δ %":                 st.column_config.NumberColumn(format="%.1f%%"),
+                }
+            )
+        else:
+            st.info("São necessários pelo menos 2 meses de dados para o comparativo.")
+
+        if _obra_sel != "Todas":
+            _drill_through(df_fil, f"Obra {_obra_sel}")
+
+    # ════════════════════════════════════════════════════════
+    # ABA 4 — Faturamento Direto
+    # ════════════════════════════════════════════════════════
+    with aba4:
+        with st.spinner("Carregando medições..."):
+            df_med = carregar_medicoes_faturamento()
+
+        _desc_diretas = ["CIMENTO","AÇO","CORDOALHA","FRETE","GUINDASTE",
+                         "COBERTURA","VIDRO SERIGRAFADO","PERFIL INFERIOR",
+                         "PERFIL SUPERIOR","VIDRO","FORMA","PEÇA DE LIGAÇÃO",
+                         "OUTROS MONTAGEM","MONTAGEM","MONTAGEM LAJES"]
+
+        if not df_med.empty:
+            if _dt_ini:
+                df_med = df_med[df_med["data_emissao"] >= pd.Timestamp(_dt_ini)]
+            if _dt_fim:
+                df_med = df_med[df_med["data_emissao"] <= pd.Timestamp(_dt_fim)]
+            _df_med_dir = df_med[
+                df_med["descricao"].fillna("").str.upper()
+                .apply(lambda d: any(kw in d for kw in _desc_diretas))
+            ]
+        else:
+            _df_med_dir = pd.DataFrame()
+
+        _tot_fat_dir = _df_med_dir["valor"].sum() if not _df_med_dir.empty else 0
+        _tot_ins_fab = df_fil.loc[
+            (df_fil["grupo_custo"] == "Insumos Estruturais") &
+            (df_fil["tipo_centro"] == "Indireto (Fábrica)"), "valor_global"
+        ].sum()
+        _margem_rep  = _tot_fat_dir - _tot_ins_fab
+        _tot_med_all = df_med["valor"].sum() if not df_med.empty else 0
+        _pct_fat_dir = (_tot_fat_dir / _tot_med_all * 100) if _tot_med_all > 0 else 0
+
+        fc1, fc2, fc3, fc4 = st.columns(4)
+        fc1.metric("Faturamento Direto", fmt_brl(_tot_fat_dir))
+        fc2.metric("Custo Insumos Fábrica", fmt_brl(_tot_ins_fab))
+        fc3.metric("Margem de Repasse", fmt_brl(_margem_rep))
+        fc4.metric("% do Faturamento Total", f"{_pct_fat_dir:.1f}%")
+
+        # Tabela de confronto por tipo
+        st.subheader("Confronto por Tipo de Insumo")
+        _confronto = []
+        for _ins_nome, _desc_kw, _cg_kw in [
+            ("Cimento",    ["CIMENTO"],    "CIMENTO"),
+            ("Aço",        ["AÇO"],        "AÇO PARA ESTRUTURAS"),
+            ("Cordoalha",  ["CORDOALHA"],  "CORDOALHA"),
+            ("Frete",      ["FRETE"],      "FRETE PJ"),
+        ]:
+            _v_fat = _df_med_dir[
+                _df_med_dir["descricao"].fillna("").str.upper()
+                .apply(lambda d: any(kw in d for kw in _desc_kw))
+            ]["valor"].sum() if not _df_med_dir.empty else 0
+            _v_cus = df_fil[
+                df_fil["conta_gerencial"].fillna("").str.upper().str.contains(_cg_kw, na=False)
+            ]["valor_global"].sum()
+            _dif = _v_fat - _v_cus
+            _marg = (_dif / _v_fat * 100) if _v_fat > 0 else 0
+            _confronto.append({
+                "Insumo": _ins_nome,
+                "Faturado ao Cliente (R$)": _v_fat,
+                "Custo Pago (R$)": _v_cus,
+                "Diferença (R$)": _dif,
+                "Margem (%)": _marg,
+            })
+        st.dataframe(pd.DataFrame(_confronto), use_container_width=True, hide_index=True,
+                     column_config={
+                         "Faturado ao Cliente (R$)": st.column_config.NumberColumn(format="R$ %.0f"),
+                         "Custo Pago (R$)":          st.column_config.NumberColumn(format="R$ %.0f"),
+                         "Diferença (R$)":           st.column_config.NumberColumn(format="R$ %.0f"),
+                         "Margem (%)":               st.column_config.NumberColumn(format="%.1f%%"),
+                     })
+
+        # Gráfico por obra
+        _df_ins_obra = (df_fil[df_fil["grupo_custo"] == "Insumos Estruturais"]
+                        .dropna(subset=["cod4"])
+                        .groupby("cod4")["valor_global"].sum().reset_index()
+                        .rename(columns={"cod4":"obra","valor_global":"custo"}))
+        if not _df_ins_obra.empty and not _df_med_dir.empty:
+            st.subheader("Custo vs Faturamento por Obra")
+            _mob_p = mapa_obras()
+            _mob_inv = {v: k for k, v in _mob_p.items()}
+            _df_fat_obra = (_df_med_dir.dropna(subset=["obra_id"])
+                            .groupby("obra_id")["valor"].sum().reset_index())
+            _df_fat_obra["obra"] = _df_fat_obra["obra_id"].apply(
+                lambda x: _mob_inv.get(int(x)) if x is not None else None)
+            _df_fat_obra = _df_fat_obra.dropna(subset=["obra"])
+            _df_cv = _df_ins_obra.merge(_df_fat_obra[["obra","valor"]], on="obra", how="outer").fillna(0)
+            _df_cv = _df_cv.rename(columns={"valor":"faturado"}).sort_values("custo", ascending=False)
+
+            fig_cv = go.Figure()
+            fig_cv.add_trace(go.Bar(x=_df_cv["obra"], y=_df_cv["faturado"],
+                                    name="Faturado", marker_color="#43A047"))
+            fig_cv.add_trace(go.Bar(x=_df_cv["obra"], y=_df_cv["custo"],
+                                    name="Custo", marker_color="#E53935"))
+            fig_cv.update_layout(barmode="group", height=320,
+                                  xaxis_title="Obra (cod4)", yaxis_title="R$",
+                                  margin=dict(t=20, b=40))
+            st.plotly_chart(fig_cv, use_container_width=True)
+
+        if _obra_sel != "Todas":
+            _drill_through(df_fil, f"Obra {_obra_sel}")
+
+    # ════════════════════════════════════════════════════════
+    # ABA 5 — Custo por m³
+    # ════════════════════════════════════════════════════════
+    with aba5:
+        with st.spinner("Carregando volume de produção..."):
+            vol_mes = carregar_producao_mensal()
+
+        _grps_m3 = list(_COR_GRUPO.keys()) + ["Total (todos os grupos)"]
+        _sel_ins = st.selectbox("Grupo para análise de custo/m³", _grps_m3,
+                                index=len(_grps_m3)-1, key="cd_sel_ins")
+
+        # Mês mais recente com volume
+        _vol_pos = vol_mes[vol_mes > 0] if not vol_mes.empty else pd.Series(dtype=float)
+        _mes_rec_v = _vol_pos.index.max() if not _vol_pos.empty else None
+
+        # Bloco A — Métricas do mês mais recente
+        if _mes_rec_v:
+            _vol_rec = _vol_pos[_mes_rec_v]
+            def _custo_mes_rec(grp_filtro=None, cg_filtro=None):
+                _mask = df_fil["mes"] == _mes_rec_v
+                if grp_filtro:
+                    _mask &= df_fil["grupo_custo"] == grp_filtro
+                if cg_filtro:
+                    _mask &= df_fil["conta_gerencial"].str.upper().str.strip() == cg_filtro
+                return df_fil.loc[_mask, "valor_global"].sum()
+
+            def _rpm3_hist(grp_filtro=None, cg_filtro=None):
+                _sub = df_fil.copy()
+                if grp_filtro:
+                    _sub = _sub[_sub["grupo_custo"] == grp_filtro]
+                if cg_filtro:
+                    _sub = _sub[_sub["conta_gerencial"].str.upper().str.strip() == cg_filtro]
+                _c_mes = _sub.groupby("mes")["valor_global"].sum()
+                _df_m = pd.DataFrame({"custo": _c_mes}).join(vol_mes.rename("vol"), how="inner")
+                _df_m = _df_m[_df_m["vol"] > 0]
+                if _df_m.empty:
+                    return None, None
+                _r = _df_m["custo"] / _df_m["vol"]
+                return _r.mean(), _r.std()
+
+            st.subheader(f"Custo/m³ — {_mes_rec_v}")
+            _m1, _m2, _m3, _m4, _m5 = st.columns(5)
+            for _col_met, _lbl, _grp_f, _cg_f in [
+                (_m1, "Pessoal + Ben./m³", None, None),
+                (_m2, "Insumos Estr./m³",  "Insumos Estruturais", None),
+                (_m3, "Materiais Cons./m³", "Materiais de Consumo", None),
+                (_m4, "Logística/m³",       "Logística", None),
+                (_m5, "Total Geral/m³",     None, None),
+            ]:
+                if _lbl == "Pessoal + Ben./m³":
+                    _c = (df_fil.loc[(df_fil["mes"] == _mes_rec_v) &
+                                     (df_fil["grupo_custo"].isin(["Pessoal","Benefícios"])),
+                                     "valor_global"].sum())
+                    _med, _ = _rpm3_hist()
+                elif _lbl == "Total Geral/m³":
+                    _c = _custo_mes_rec()
+                    _med, _ = _rpm3_hist()
+                else:
+                    _c = _custo_mes_rec(_grp_f, _cg_f)
+                    _med, _ = _rpm3_hist(_grp_f, _cg_f)
+                _rpm3_v = _c / _vol_rec if _vol_rec > 0 else 0
+                _med_rpm3 = (_med / _vol_rec if _med and _vol_rec > 0 else None)
+                _delta = (f"Δ vs média: {fmt_brl(_rpm3_v - _med_rpm3)}/m³"
+                          if _med_rpm3 else None)
+                _col_met.metric(_lbl, f"R$ {_rpm3_v:,.1f}", delta=_delta,
+                                delta_color="inverse")
+
+            st.divider()
+            _m6, _m7, _m8, _m9, _m10 = st.columns(5)
+            for _col_met, _lbl, _cg_name in [
+                (_m6,  "Cimento/m³",     "CIMENTO"),
+                (_m7,  "Aço/m³",         "AÇO PARA ESTRUTURAS"),
+                (_m8,  "Cordoalha/m³",   "CORDOALHA"),
+                (_m9,  "Areia/m³",       "AREIA NATURAL"),
+                (_m10, "Serviços PJ/m³", None),
+            ]:
+                if _cg_name:
+                    _c = _custo_mes_rec(cg_filtro=_cg_name)
+                    _med, _ = _rpm3_hist(cg_filtro=_cg_name)
+                else:
+                    _c = _custo_mes_rec("Serviços PJ")
+                    _med, _ = _rpm3_hist("Serviços PJ")
+                _rpm3_v = _c / _vol_rec if _vol_rec > 0 else 0
+                _med_rpm3 = (_med / _vol_rec if _med and _vol_rec > 0 else None)
+                _delta = (f"Δ: {fmt_brl(_rpm3_v - _med_rpm3)}/m³" if _med_rpm3 else None)
+                _col_met.metric(_lbl, f"R$ {_rpm3_v:,.1f}", delta=_delta,
+                                delta_color="inverse")
+        else:
+            st.info("Nenhum mês com volume de produção encontrado no período.")
+
+        # Bloco B — Gráfico de evolução custo/m³
+        st.subheader("Evolução do Custo/m³")
+        if _sel_ins == "Total (todos os grupos)":
+            _c_mensal = df_fil.groupby("mes")["valor_global"].sum()
+        else:
+            _c_mensal = (df_fil[df_fil["grupo_custo"] == _sel_ins]
+                         .groupby("mes")["valor_global"].sum())
+        _df_rpm3 = pd.DataFrame({"custo": _c_mensal}).join(vol_mes.rename("vol"), how="inner")
+        _df_rpm3 = _df_rpm3[_df_rpm3["vol"] > 0].copy()
+        _df_rpm3["rpm3"] = _df_rpm3["custo"] / _df_rpm3["vol"]
+        _df_rpm3 = _df_rpm3.sort_index()
+
+        if not _df_rpm3.empty:
+            _med_h  = _df_rpm3["rpm3"].mean()
+            _std_h  = _df_rpm3["rpm3"].std()
+            _meses_r = _df_rpm3.index.tolist()
+
+            fig_rpm3 = go.Figure()
+            # Banda ±1σ
+            if not pd.isna(_std_h):
+                fig_rpm3.add_trace(go.Scatter(
+                    x=_meses_r + _meses_r[::-1],
+                    y=([_med_h + _std_h] * len(_meses_r) +
+                       [_med_h - _std_h] * len(_meses_r)),
+                    fill="toself", fillcolor="rgba(33,150,243,0.1)",
+                    line=dict(color="rgba(0,0,0,0)"),
+                    name="±1σ", showlegend=True
+                ))
+            # Linha média
+            fig_rpm3.add_hline(y=_med_h, line_dash="dash",
+                                line_color="#616161", annotation_text="Média histórica")
+            # Linha principal
+            fig_rpm3.add_trace(go.Scatter(
+                x=_meses_r, y=_df_rpm3["rpm3"],
+                mode="lines+markers", name="R$/m³",
+                line=dict(color="#1976D2", width=2),
+                marker=dict(
+                    color=["#E53935" if v > _med_h else "#43A047"
+                           for v in _df_rpm3["rpm3"]],
+                    size=8
+                ),
+                hovertemplate=(
+                    "<b>%{x}</b><br>"
+                    "R$/m³: R$ %{y:,.1f}<br>"
+                    "Vol: %{customdata[0]:,.1f} m³<br>"
+                    "Custo: R$ %{customdata[1]:,.0f}<extra></extra>"
+                ),
+                customdata=_df_rpm3[["vol","custo"]].values
+            ))
+            fig_rpm3.update_layout(height=360, hovermode="x unified",
+                                   yaxis_title="R$/m³", xaxis_title="Mês",
+                                   margin=dict(t=20, b=40))
+            st.plotly_chart(fig_rpm3, use_container_width=True)
+
+        # Bloco C — Tabela mensal
+        st.subheader("Tabela Mensal Detalhada")
+        if not _df_rpm3.empty:
+            _df_rpm3_show = _df_rpm3.copy().reset_index()
+            _df_rpm3_show.columns = ["Mês","Custo Total (R$)","Volume m³","R$/m³"]
+            _df_rpm3_show["vs Média"] = _df_rpm3_show["R$/m³"] - _med_h
+            _df_rpm3_show["Classe"]   = _df_rpm3_show["R$/m³"].apply(
+                lambda v: "🟢 Bom" if v <= _med_h else
+                          ("🟡 Atenção" if v <= _med_h * 1.2 else "🔴 Ruim"))
+            st.dataframe(
+                _df_rpm3_show[["Mês","Volume m³","Custo Total (R$)","R$/m³","vs Média","Classe"]]
+                .sort_values("Mês", ascending=False),
+                use_container_width=True, hide_index=True,
+                column_config={
+                    "Volume m³":       st.column_config.NumberColumn(format="%.1f"),
+                    "Custo Total (R$)":st.column_config.NumberColumn(format="R$ %.0f"),
+                    "R$/m³":           st.column_config.NumberColumn(format="R$ %.1f"),
+                    "vs Média":        st.column_config.NumberColumn(format="R$ %.1f"),
+                }
+            )
+
+        # Bloco D — Heatmap custo/m³
+        st.subheader("Sazonalidade do Custo/m³")
+        if not _df_rpm3.empty:
+            _df_h2 = _df_rpm3.reset_index().copy()
+            _df_h2["mes_dt"] = pd.to_datetime(_df_h2["mes"], format="%Y-%m", errors="coerce")
+            _df_h2["mes_num"] = _df_h2["mes_dt"].dt.month
+            _df_h2["ano_str"] = _df_h2["mes_dt"].dt.year.astype(str)
+            _piv2 = _df_h2.pivot_table(index="ano_str", columns="mes_num",
+                                        values="rpm3", aggfunc="mean")
+            _piv2.columns = [_meses_pt.get(c, str(c)) for c in _piv2.columns]
+            fig_h2 = px.imshow(_piv2, text_auto=".1f",
+                               color_continuous_scale=["#43A047","#FFEE58","#E53935"],
+                               aspect="auto")
+            fig_h2.update_layout(height=max(180, min(70 * len(_piv2), 400)),
+                                  margin=dict(t=20, b=20))
+            st.plotly_chart(fig_h2, use_container_width=True)
+
+        if _obra_sel != "Todas":
+            _drill_through(df_fil, f"Obra {_obra_sel}")
+
+    # ════════════════════════════════════════════════════════
+    # ABA 6 — Tributos
+    # ════════════════════════════════════════════════════════
+    with aba6:
+        st.info(
+            "Os tributos sobre faturamento (ICMS, PIS, COFINS) não transitam como "
+            "lançamentos individuais neste sistema — estão embutidos nas notas fiscais. "
+            "Esta aba cobre os tributos que geram lançamentos explícitos: "
+            "encargos sobre folha, retenções e guias."
+        )
+
+        def _classificar_tributo(row):
+            cg  = str(row.get("conta_gerencial", "") or "").upper().strip()
+            ctd = str(row.get("cod_tipo_doc",    "") or "").upper().strip()
+            cm  = str(row.get("conta_macro",     "") or "").upper().strip()
+            ps  = str(row.get("produto_servico", "") or "").upper().strip()
+            if "INSS" in cg:
+                return "Previdência (INSS)"
+            if "FGTS" in cg:
+                return "FGTS"
+            if "IRRF" in cg:
+                return "IR/IRRF"
+            if any(k in cg for k in ["SESI","SENAI","CONTRIBUIÇÕES A ENTIDADES"]):
+                return "Contribuições Sociais"
+            if any(k in cg for k in ["TAXAS","ALVARÁ","LICENÇA"]):
+                return "Taxas e Licenças"
+            if "DARF" in ctd:
+                return "IR/IRRF"
+            if any(k in ctd for k in ["GPS","PREVIDENCIA"]):
+                return "Previdência Social (GPS)"
+            if "DAE" in ctd:
+                return "Taxas e Licenças"
+            if "GUIA DE RECOLHIMENTO" in ctd:
+                return "Previdência Social (GPS)"
+            if "FGTS" in ctd:
+                return "FGTS"
+            if "DESPESAS TRIBUTÁRIAS" in cm or "DESPESAS TRIBUTARIAS" in cm:
+                return "Outros Tributos"
+            if "CIEE" in ps:
+                return "Contribuições Sociais"
+            return None
+
+        def extrair_tributos(df_custos, df_despesas):
+            _cols_t = ["data","mes","ano","centro_custos","conta_gerencial",
+                       "cod_tipo_doc","produto_servico","cli_fornecedor",
+                       "valor_global","conta_macro"]
+            parts = []
+            for _df, _orig in [(df_custos, "Custo"), (df_despesas, "Despesa")]:
+                if _df is None or _df.empty:
+                    continue
+                _sub = _df[[c for c in _cols_t if c in _df.columns]].copy()
+                _sub["origem"] = _orig
+                _sub["grupo_tributo"] = _sub.apply(_classificar_tributo, axis=1)
+                parts.append(_sub[_sub["grupo_tributo"].notna()])
+            if not parts:
+                return pd.DataFrame()
+            return pd.concat(parts, ignore_index=True)
+
+        _df_trib = extrair_tributos(
+            df_cus if not df_cus.empty else None,
+            df_des if not df_des.empty else None
+        )
+
+        if _dt_ini and not _df_trib.empty:
+            _df_trib = _df_trib[_df_trib["data"] >= pd.Timestamp(_dt_ini)]
+        if _dt_fim and not _df_trib.empty:
+            _df_trib = _df_trib[_df_trib["data"] <= pd.Timestamp(_dt_fim)]
+
+        if _df_trib.empty:
+            st.warning("Nenhum lançamento tributário identificado no período.")
+        else:
+            _tot_trib = _df_trib["valor_global"].sum()
+
+            # KPIs
+            _rec_periodo = pd.Series(dtype=float)
+            if not df_rec.empty:
+                _rec_f = df_rec.copy()
+                if _dt_ini:
+                    _rec_f = _rec_f[_rec_f["data"] >= pd.Timestamp(_dt_ini)]
+                if _dt_fim:
+                    _rec_f = _rec_f[_rec_f["data"] <= pd.Timestamp(_dt_fim)]
+                _rec_periodo = _rec_f[_rec_f["valor_global"] > 0]["valor_global"].sum()
+            else:
+                _rec_periodo = 0
+
+            _pct_receita = (_tot_trib / _rec_periodo * 100) if _rec_periodo > 0 else 0
+            _pct_custo_t = (_tot_trib / _tot * 100) if _tot > 0 else 0
+            _grupo_maior = _df_trib.groupby("grupo_tributo")["valor_global"].sum().idxmax()
+            _grupo_maior_val = _df_trib.groupby("grupo_tributo")["valor_global"].sum().max()
+            _meses_trib_ord = sorted(_df_trib["mes"].dropna().unique(), reverse=True)
+            if len(_meses_trib_ord) >= 2:
+                _val_rec_t = _df_trib[_df_trib["mes"] == _meses_trib_ord[0]]["valor_global"].sum()
+                _val_ant_t = _df_trib[_df_trib["mes"] == _meses_trib_ord[1]]["valor_global"].sum()
+                _var_trib  = ((_val_rec_t - _val_ant_t) / _val_ant_t * 100) if _val_ant_t > 0 else 0
+                _delta_trib = f"{_var_trib:+.1f}% vs mês anterior"
+            else:
+                _delta_trib = None
+
+            kt1, kt2, kt3, kt4, kt5 = st.columns(5)
+            kt1.metric("Total de Tributos", fmt_brl(_tot_trib))
+            kt2.metric("% sobre Receita Bruta", f"{_pct_receita:.1f}%")
+            kt3.metric("% sobre Custo Total",   f"{_pct_custo_t:.1f}%")
+            kt4.metric("Maior Grupo", f"{_grupo_maior}\n{fmt_brl(_grupo_maior_val)}")
+            kt5.metric("Variação vs Mês Ant.", _delta_trib or "—")
+
+            # Bloco A — Composição por grupo
+            st.subheader("Composição por Grupo")
+            _trib_grp = _df_trib.groupby("grupo_tributo")["valor_global"].sum()
+            tc1, tc2 = st.columns(2)
+            with tc1:
+                fig_tp = go.Figure(go.Pie(
+                    labels=_trib_grp.index, values=_trib_grp.values,
+                    hole=0.42,
+                    marker_colors=[_COR_TRIB.get(g, "#9E9E9E") for g in _trib_grp.index],
+                    textinfo="label+percent"
+                ))
+                fig_tp.update_layout(title="Proporção por grupo", height=350,
+                                     margin=dict(t=40, b=10))
+                st.plotly_chart(fig_tp, use_container_width=True)
+            with tc2:
+                _trib_ord = _trib_grp.sort_values(ascending=True)
+                fig_tb = go.Figure(go.Bar(
+                    x=_trib_ord.values, y=_trib_ord.index,
+                    orientation="h",
+                    marker_color=[_COR_TRIB.get(g, "#9E9E9E") for g in _trib_ord.index],
+                    hovertemplate="<b>%{y}</b><br>R$ %{x:,.0f}<extra></extra>"
+                ))
+                fig_tb.update_layout(height=350, xaxis_title="Valor (R$)",
+                                     margin=dict(t=40, b=10))
+                st.plotly_chart(fig_tb, use_container_width=True)
+
+            # Bloco B — Evolução mensal
+            st.subheader("Evolução Mensal por Grupo")
+            _trib_ev = (_df_trib.groupby(["mes","grupo_tributo"])["valor_global"]
+                        .sum().reset_index())
+            _trib_tot = _df_trib.groupby("mes")["valor_global"].sum()
+            _meses_t_ord = sorted(_trib_ev["mes"].unique())
+            fig_tev = go.Figure()
+            for _grp_t, _cor_t in _COR_TRIB.items():
+                _d = _trib_ev[_trib_ev["grupo_tributo"] == _grp_t]
+                if _d.empty:
+                    continue
+                _d = _d.set_index("mes").reindex(_meses_t_ord, fill_value=0).reset_index()
+                fig_tev.add_trace(go.Bar(
+                    x=_d["mes"], y=_d["valor_global"],
+                    name=_grp_t, marker_color=_cor_t,
+                    hovertemplate=f"<b>{_grp_t}</b><br>%{{x}}<br>R$ %{{y:,.0f}}<extra></extra>"
+                ))
+            _trib_tot_ord = _trib_tot.reindex(_meses_t_ord, fill_value=0)
+            fig_tev.add_trace(go.Scatter(
+                x=_meses_t_ord, y=_trib_tot_ord.values,
+                name="Total", mode="lines+markers",
+                line=dict(color="#212121", width=2, dash="dot"),
+                yaxis="y2",
+                hovertemplate="<b>Total</b><br>%{x}<br>R$ %{y:,.0f}<extra></extra>"
+            ))
+            fig_tev.update_layout(
+                barmode="stack", hovermode="x unified", height=340,
+                yaxis=dict(title="R$"),
+                yaxis2=dict(title="Total", overlaying="y", side="right", showgrid=False),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                margin=dict(t=50, b=40)
+            )
+            st.plotly_chart(fig_tev, use_container_width=True)
+
+            # Bloco C — Carga tributária efetiva
+            st.subheader("Carga Tributária Efetiva (% sobre Receita Bruta)")
+            if not df_rec.empty:
+                _rec_mes = _rec_f[_rec_f["valor_global"] > 0].groupby("mes")["valor_global"].sum()
+                _trib_mes = _df_trib.groupby("mes")["valor_global"].sum()
+                _carga_ef = (_trib_mes / _rec_mes * 100).dropna()
+                _carga_ef = _carga_ef[_carga_ef.index.isin(_trib_mes.index)]
+
+                if not _carga_ef.empty:
+                    _med_carga = _carga_ef.mean()
+                    _lim_carga = 15.0
+                    _meses_ce  = sorted(_carga_ef.index.tolist())
+                    fig_cef = go.Figure()
+                    fig_cef.add_hline(y=_med_carga, line_dash="dash",
+                                      line_color="#616161", annotation_text="Média")
+                    fig_cef.add_hline(y=_lim_carga, line_dash="dot",
+                                      line_color="#E53935", annotation_text="15% ref.")
+                    fig_cef.add_trace(go.Scatter(
+                        x=_meses_ce,
+                        y=[_carga_ef.get(m, None) for m in _meses_ce],
+                        mode="lines+markers", name="Carga tributária (%)",
+                        line=dict(color="#1976D2", width=2),
+                        marker=dict(
+                            color=["#E53935" if (_carga_ef.get(m,0) or 0) > _lim_carga
+                                   else "#43A047" for m in _meses_ce],
+                            size=8
+                        ),
+                        hovertemplate="<b>%{x}</b><br>%{y:.1f}%<extra></extra>"
+                    ))
+                    fig_cef.update_layout(height=280, hovermode="x unified",
+                                          yaxis_title="% da Receita",
+                                          margin=dict(t=20, b=40))
+                    st.plotly_chart(fig_cef, use_container_width=True)
+                    st.caption(
+                        "Carga tributária = tributos pagos ÷ receita bruta do período. "
+                        "Não inclui tributos embutidos no preço (ICMS, PIS, COFINS sobre vendas isentas)."
+                    )
+                else:
+                    st.info("Sem dados suficientes para calcular carga tributária.")
+            else:
+                st.info("Tabela de receitas não encontrada — carga tributária indisponível.")
+
+            # Bloco D — Tabela detalhada
+            st.subheader("Detalhamento dos Lançamentos")
+            td1, td2, td3 = st.columns(3)
+            _grps_trib_opts = ["Todos"] + sorted(_df_trib["grupo_tributo"].dropna().unique().tolist())
+            _fil_gt = td1.selectbox("Grupo", _grps_trib_opts, key="cd_trib_grp")
+            _fil_tm = td2.selectbox("Mês", ["Todos"] + sorted(
+                _df_trib["mes"].dropna().unique().tolist(), reverse=True), key="cd_trib_mes")
+            _fil_to = td3.selectbox("Origem", ["Todos","Custo","Despesa"], key="cd_trib_orig")
+
+            _df_trib_f = _df_trib.copy()
+            if _fil_gt != "Todos":
+                _df_trib_f = _df_trib_f[_df_trib_f["grupo_tributo"] == _fil_gt]
+            if _fil_tm != "Todos":
+                _df_trib_f = _df_trib_f[_df_trib_f["mes"] == _fil_tm]
+            if _fil_to != "Todos":
+                _df_trib_f = _df_trib_f[_df_trib_f["origem"] == _fil_to]
+
+            _cols_trib_show = ["data","origem","grupo_tributo","conta_gerencial",
+                               "cli_fornecedor","centro_custos","cod_tipo_doc","valor_global"]
+            _cols_trib_ok = [c for c in _cols_trib_show if c in _df_trib_f.columns]
+            st.dataframe(
+                _df_trib_f[_cols_trib_ok].rename(columns={
+                    "data":           "Data",
+                    "origem":         "Origem",
+                    "grupo_tributo":  "Grupo",
+                    "conta_gerencial":"Conta Gerencial",
+                    "cli_fornecedor": "Fornecedor/Beneficiário",
+                    "centro_custos":  "Centro de Custo",
+                    "cod_tipo_doc":   "Documento",
+                    "valor_global":   "Valor (R$)",
+                }).sort_values("Data", ascending=False),
+                use_container_width=True, hide_index=True,
+                column_config={"Valor (R$)": st.column_config.NumberColumn(format="R$ %.0f")}
+            )
+            st.caption(
+                f"**{len(_df_trib_f)}** lançamentos · "
+                f"Total filtrado: {fmt_brl(_df_trib_f['valor_global'].sum())}"
             )
