@@ -26,9 +26,9 @@ st.sidebar.divider()
 
 pagina_selecionada = st.sidebar.radio("Menu Principal", [
     "--- 📊 DASHBOARDS ---", "🏭 Produção", "💰 Financeiro", "🔍 Análise da Obra", "👷 Folha / RH",
-    "--- 🛠️ GESTÃO ---", "🏗️ Gestão de Obras", "🛤️ Jornada da Obra", "👥 Equipe", 
+    "--- 🛠️ GESTÃO ---", "🏗️ Gestão de Obras", "🛤️ Jornada da Obra", "👥 Equipe",
     "📋 Gestão à Vista", "👤 Reunião 1:1",
-    "--- 🗄️ BASE DE DADOS ---", "📥 Importador de Arquivos"
+    "--- 🗄️ BASE DE DADOS ---", "✏️ Editar Obras", "📥 Importador de Arquivos"
 ])
 if "---" in pagina_selecionada:
     st.sidebar.warning("👆 Selecione uma página válida.")
@@ -243,6 +243,72 @@ if pagina_selecionada == "📥 Importador de Arquivos":
             st.error(f"❌ Erro ao ler CSV: {e}")
             st.stop()
 
+        # ── Correlação com Obras (rotas 4–7) ─────────────────────────────────
+        if rota in ["4","5","6","7"]:
+            arquivo.seek(0)
+            _df_corr = pd.read_csv(arquivo, sep=None, engine="python",
+                                   encoding="utf-8-sig", dtype=str, header=0)
+            _df_corr.columns = [c.strip() for c in _df_corr.columns]
+            # Renomear para nomes canônicos conforme a rota
+            if rota == "7":
+                _cm7 = {
+                    "Data":"data","IdLanç":"id_lancamento","NºDoc":"numero_doc",
+                    "Centro de Custos":"centro_custos","Conta Macro":"conta_macro",
+                    "Conta Gerencial":"conta_gerencial","Cli/For":"cli_fornecedor",
+                    "Produto_Serviço":"produto_servico","Produto_Servico":"produto_servico",
+                    "CriadoPor":"criado_por","Valor Global":"valor_global",
+                    " Valor Global ":"valor_global","Qtd":"qtd",
+                    "PrecoUnitario":"preco_unitario"," PrecoUnitario ":"preco_unitario",
+                    "Origem":"origem","Chave_ColigadaIdOrigem":"chave_coligada",
+                    "Cód. e Tipo Doc/Movimento":"cod_tipo_doc",
+                }
+                _df_corr = _df_corr.rename(columns=_cm7)
+            else:
+                _pn_map = {
+                    "4": ["peca","codigo","obra_codigo","etapa","produto","secao",
+                           "qtde_pecas","volume_total","data_fabricacao","volume_teorico",
+                           "peso_aco","peso_aco_frouxo","peso_aco_protendido","comprimento"],
+                    "5": ["peca","codigo","obra_codigo","etapa","produto","data_expedicao",
+                           "volume_real","status","peso","numero_carga","transportadora",
+                           "motorista","nota_fiscal"],
+                    "6": ["peca","codigo","obra_codigo","etapa","produto","secao",
+                           "qtde_pecas","volume_total","data_montagem","volume_teorico","peso"],
+                }
+                _pn = _pn_map[rota]
+                _nn = min(len(_pn), len(_df_corr.columns))
+                _df_corr.columns = _pn[:_nn] + list(_df_corr.columns[_nn:])
+            # Detecta colunas com código de obra (4 dígitos)
+            _cands_corr = []
+            for _cc in _df_corr.columns:
+                _ss = _df_corr[_cc].apply(extrair_codigo).dropna()
+                if len(_ss) > 0:
+                    _top_cod = _ss.value_counts().index[0]
+                    _cands_corr.append((_cc, _top_cod, len(_ss)))
+            with st.expander("🔗 Correlação com Obras", expanded=(rota == "7")):
+                if _cands_corr:
+                    st.dataframe(
+                        pd.DataFrame(_cands_corr,
+                                     columns=["Coluna no arquivo","Exemplo cod4","Nº linhas"]),
+                        use_container_width=True, hide_index=True)
+                    st.caption("O sistema vai usar a **primeira coluna da lista** como referência "
+                               "de obra, salvo se você selecionar outra abaixo.")
+                else:
+                    st.warning("⚠️ Nenhuma coluna com código de 4 dígitos encontrada. "
+                               "Use o campo abaixo para especificar manualmente.")
+                _opts_corr = (["🔍 Automático"]
+                              + [_cc for _cc, _, _ in _cands_corr]
+                              + ["⛔ Nenhuma (sem vínculo com obra)"])
+                st.selectbox("Coluna que contém o código da obra:",
+                             options=_opts_corr, key="imp_col_obra_sel",
+                             help="Selecione 'Automático' para usar a detecção padrão "
+                                  "(primeira coluna da tabela acima).")
+                st.text_input(
+                    "Ou informe um cod4 fixo para TODAS as linhas (ex: 8198):",
+                    key="imp_cod4_manual",
+                    placeholder="Deixe vazio para usar a coluna selecionada acima",
+                    help="Use quando todas as linhas do arquivo pertencem a uma única obra. "
+                         "Se preenchido, tem prioridade sobre a seleção acima.")
+
         if st.button("🚀 Importar", type="primary"):
             with st.spinner("Processando..."):
                 try:
@@ -456,15 +522,33 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                                          "volume_teorico","peso"]
                         _np_n = min(len(_np_nomes), len(df_p.columns))
                         df_p.columns = _np_nomes[:_np_n] + list(df_p.columns[_np_n:])
-                        mob_p = mapa_obras()
-                        df_p["obra_id"]   = aplicar_obra_id(
-                            df_p["obra_codigo"].apply(extrair_codigo), mob_p)
-                        df_p["cod4_obra"] = df_p["obra_codigo"].apply(extrair_codigo)
-                        df_p["cod4_obra"] = df_p["cod4_obra"].apply(
-                            lambda v: None if (v is None or str(v).strip().lower()
-                                               in ("nan","none","")) else str(v)
-                        )
-                        sem_obra_p = int(df_p["obra_id"].isna().sum())
+                        mob_p  = mapa_obras()
+                        _sel_p = st.session_state.get("imp_col_obra_sel", "🔍 Automático")
+                        _man_p = re.sub(r"\D", "", st.session_state.get("imp_cod4_manual", ""))[:4]
+
+                        def _set_prod_obra(df_src, col_ref):
+                            df_src["obra_id"]   = aplicar_obra_id(
+                                df_src[col_ref].apply(extrair_codigo), mob_p)
+                            df_src["cod4_obra"] = df_src[col_ref].apply(extrair_codigo).apply(
+                                lambda v: None if (
+                                    v is None or str(v).strip().lower()
+                                    in ("nan","none","")) else str(v))
+                            return df_src
+
+                        if _man_p and len(_man_p) == 4:
+                            _oid_p = mob_p.get(_man_p)
+                            df_p["obra_id"]   = int(_oid_p) if _oid_p else None
+                            df_p["cod4_obra"] = _man_p
+                        elif (_sel_p not in ("🔍 Automático", "⛔ Nenhuma (sem vínculo com obra)")
+                              and _sel_p in df_p.columns):
+                            df_p = _set_prod_obra(df_p, _sel_p)
+                        elif _sel_p == "⛔ Nenhuma (sem vínculo com obra)":
+                            df_p["obra_id"]   = None
+                            df_p["cod4_obra"] = None
+                        else:
+                            df_p = _set_prod_obra(df_p, "obra_codigo")
+
+                        sem_obra_p = int(pd.Series(df_p["obra_id"]).isna().sum())
                         df_p[date_p] = formatar_data(df_p[date_p])
                         for c_p in num_p:
                             if c_p in df_p.columns:
@@ -541,25 +625,38 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         # Strip de espaços nos nomes de colunas antes do rename
                         df7.columns = [c.strip() for c in df7.columns]
                         df7 = df7.rename(columns=col_map)
-                        mob7 = mapa_obras()
-                        # Tenta extrair obra de qualquer coluna com código de 4 dígitos
-                        # Se não encontrar, obra_id = NULL (comportamento esperado)
-                        cod4_encontrado = None
-                        for col_tentativa in ["obra_codigo", "obra", "Centro de Custos",
-                                              "centro_custos"]:
-                            if col_tentativa in df7.columns:
-                                serie = df7[col_tentativa].apply(extrair_codigo)
-                                if serie.notna().any():
-                                    cod4_encontrado = col_tentativa
-                                    break
-                        if cod4_encontrado:
-                            df7["obra_id"] = aplicar_obra_id(
-                                df7[col_tentativa].apply(extrair_codigo), mob7)
+                        # Correlação informativa (custos não tem obra_id no BD)
+                        _sel7 = st.session_state.get("imp_col_obra_sel", "🔍 Automático")
+                        _man7 = re.sub(r"\D", "", st.session_state.get("imp_cod4_manual", ""))[:4]
+
+                        if _man7 and len(_man7) == 4:
+                            _ref_col7 = None
+                            _ref_cod4_fixo7 = _man7
+                        elif (_sel7 not in ("🔍 Automático", "⛔ Nenhuma (sem vínculo com obra)")
+                              and _sel7 in df7.columns):
+                            _ref_col7 = _sel7
+                            _ref_cod4_fixo7 = None
+                        elif _sel7 == "⛔ Nenhuma (sem vínculo com obra)":
+                            _ref_col7 = None
+                            _ref_cod4_fixo7 = None
                         else:
-                            df7["obra_id"] = None
+                            _ref_cod4_fixo7 = None
+                            _ref_col7 = next(
+                                (c for c in ["obra_codigo","obra","centro_custos"]
+                                 if c in df7.columns
+                                 and df7[c].apply(extrair_codigo).notna().any()),
+                                None)
+
+                        if _ref_cod4_fixo7:
+                            com_obra7, sem_obra7 = len(df7), 0
+                        elif _ref_col7:
+                            _s7 = df7[_ref_col7].apply(extrair_codigo)
+                            com_obra7 = int(_s7.notna().sum())
+                            sem_obra7 = int(_s7.isna().sum())
+                        else:
+                            com_obra7, sem_obra7 = 0, len(df7)
+
                         df7 = df7.replace("", None).where(pd.notnull(df7), None)
-                        com_obra7 = int(df7["obra_id"].notna().sum())
-                        sem_obra7 = int(df7["obra_id"].isna().sum())
                         if "data" in df7.columns:
                             df7["data"] = formatar_data(df7["data"])
                         for col7 in ["valor_global","qtd","preco_unitario"]:
@@ -4170,3 +4267,201 @@ elif pagina_selecionada == "🔍 Análise da Obra":
                 .rename(columns={"numero_nf": "NF", "tipo": "Tipo"})
             st.dataframe(df_med_show, use_container_width=True, hide_index=True)
             st.caption(f"Total faturado: **{fmt_brl(fat_real_an)}** de **{fmt_brl(fat_total_an)}**")
+# ==========================================================
+# EDITAR OBRAS
+# ==========================================================
+elif pagina_selecionada == "✏️ Editar Obras":
+    st.header("✏️ Editar Obras")
+    st.caption("Edite os dados cadastrais e financeiros diretamente na tabela. "
+               "Clique em **Salvar alterações** para persistir.")
+
+    # ── loaders locais ────────────────────────────────────────
+    @st.cache_data(ttl=30)
+    def _ed_obras():
+        r = supabase.table("obras")\
+            .select("id, cod4, nome, status, modalidade, cliente")\
+            .order("nome").execute()
+        return pd.DataFrame(r.data or [])
+
+    @st.cache_data(ttl=30)
+    def _ed_fin():
+        cols = ("cod4, faturamento_total, volume, volume_projeto, custo_total, lucro,"
+                " responsavel, cnpj, razao_social, data_contrato")
+        r = supabase.table("obras_financeiro").select(cols).execute()
+        return pd.DataFrame(r.data or [])
+
+    tab_obras, tab_fin = st.tabs(["🏗️ Obras", "💰 Financeiro"])
+
+    # ═══════════════════════════════════════════════════════════
+    # ABA 1 — OBRAS
+    # ═══════════════════════════════════════════════════════════
+    with tab_obras:
+        df_ob = _ed_obras()
+        if df_ob.empty:
+            st.info("Nenhuma obra cadastrada.")
+        else:
+            STATUS_OPT = ["A Iniciar","Em Andamento","Impedido","Concluído","N/A"]
+            df_ob_edit = st.data_editor(
+                df_ob,
+                use_container_width=True,
+                num_rows="fixed",
+                hide_index=True,
+                disabled=["id"],
+                column_config={
+                    "id":         st.column_config.NumberColumn("ID", width="small"),
+                    "cod4":       st.column_config.TextColumn("Cód4", width="small",
+                                      help="Código único de 4 dígitos da obra"),
+                    "nome":       st.column_config.TextColumn("Nome da Obra", width="large"),
+                    "status":     st.column_config.SelectboxColumn(
+                                      "Status", options=STATUS_OPT, width="medium"),
+                    "modalidade": st.column_config.TextColumn("Modalidade", width="medium"),
+                    "cliente":    st.column_config.TextColumn("Cliente", width="medium"),
+                },
+                key="editor_obras",
+            )
+            col_sav1, col_inf1 = st.columns([1, 4])
+            with col_sav1:
+                salvar_obras = st.button("💾 Salvar alterações", type="primary",
+                                         key="btn_salvar_obras")
+            if salvar_obras:
+                erros, ok = [], 0
+                for _, row in df_ob_edit.iterrows():
+                    try:
+                        supabase.table("obras").update({
+                            "cod4":       str(row["cod4"]).strip() if row["cod4"] else None,
+                            "nome":       str(row["nome"]).strip() if row["nome"] else None,
+                            "status":     str(row["status"]) if row["status"] else None,
+                            "modalidade": str(row["modalidade"]).strip()
+                                          if row.get("modalidade") else None,
+                            "cliente":    str(row["cliente"]).strip()
+                                          if row.get("cliente") else None,
+                        }).eq("id", int(row["id"])).execute()
+                        ok += 1
+                    except Exception as _ex:
+                        erros.append(f"ID {row['id']}: {_ex}")
+                try: _ed_obras.clear()
+                except: pass
+                try: carregar_obras_completo.clear()
+                except: pass
+                try: carregar_obras_ativas.clear()
+                except: pass
+                if erros:
+                    st.error(f"❌ {len(erros)} erro(s):\n" + "\n".join(erros))
+                else:
+                    st.success(f"✅ {ok} obra(s) atualizadas!")
+
+    # ═══════════════════════════════════════════════════════════
+    # ABA 2 — FINANCEIRO
+    # ═══════════════════════════════════════════════════════════
+    with tab_fin:
+        df_fin = _ed_fin()
+        if df_fin.empty:
+            st.info("Nenhum registro financeiro cadastrado.")
+        else:
+            # Mostrar também o nome da obra para contexto
+            df_ob2 = _ed_obras()[["cod4","nome"]].rename(columns={"nome":"obra_nome"})
+            df_fin_show = df_fin.merge(df_ob2, on="cod4", how="left")
+            # Reordenar: nome primeiro
+            cols_show = ["obra_nome","cod4","faturamento_total","volume","volume_projeto",
+                         "custo_total","lucro","responsavel","cnpj","razao_social","data_contrato"]
+            cols_show = [c for c in cols_show if c in df_fin_show.columns]
+            df_fin_edit = st.data_editor(
+                df_fin_show[cols_show],
+                use_container_width=True,
+                num_rows="fixed",
+                hide_index=True,
+                disabled=["cod4","obra_nome"],
+                column_config={
+                    "obra_nome":        st.column_config.TextColumn("Obra", width="large"),
+                    "cod4":             st.column_config.TextColumn("Cód4", width="small"),
+                    "faturamento_total":st.column_config.NumberColumn("Fat. Total (R$)",
+                                            format="R$ %.2f", width="medium"),
+                    "volume":           st.column_config.NumberColumn("Volume (m³)",
+                                            format="%.1f", width="small"),
+                    "volume_projeto":   st.column_config.NumberColumn("Vol. Projeto (m³)",
+                                            format="%.1f", width="small"),
+                    "custo_total":      st.column_config.NumberColumn("Custo Total (R$)",
+                                            format="R$ %.2f", width="medium"),
+                    "lucro":            st.column_config.NumberColumn("Lucro (R$)",
+                                            format="R$ %.2f", width="medium"),
+                    "responsavel":      st.column_config.TextColumn("Responsável", width="medium"),
+                    "cnpj":             st.column_config.TextColumn("CNPJ", width="medium"),
+                    "razao_social":     st.column_config.TextColumn("Razão Social", width="large"),
+                    "data_contrato":    st.column_config.DateColumn("Data Contrato",
+                                            format="DD/MM/YYYY", width="medium"),
+                },
+                key="editor_fin",
+            )
+            col_sav2, _ = st.columns([1, 4])
+            with col_sav2:
+                salvar_fin = st.button("💾 Salvar alterações", type="primary",
+                                        key="btn_salvar_fin")
+            if salvar_fin:
+                erros2, ok2 = [], 0
+                for _, row in df_fin_edit.iterrows():
+                    cod4_key = row.get("cod4")
+                    if not cod4_key:
+                        continue
+                    try:
+                        payload_fin = {}
+                        for campo in ["faturamento_total","volume","volume_projeto",
+                                      "custo_total","lucro"]:
+                            v = row.get(campo)
+                            payload_fin[campo] = (float(v)
+                                                  if v is not None and str(v) not in ("","nan")
+                                                  else None)
+                        for campo in ["responsavel","cnpj","razao_social"]:
+                            v = row.get(campo)
+                            payload_fin[campo] = (str(v).strip()
+                                                  if v is not None and str(v).strip() not in ("","nan","None")
+                                                  else None)
+                        # data_contrato: converter para isoformat
+                        dc = row.get("data_contrato")
+                        if dc is not None and str(dc) not in ("","nan","None","NaT"):
+                            try:
+                                payload_fin["data_contrato"] = pd.to_datetime(dc).date().isoformat()
+                            except Exception:
+                                payload_fin["data_contrato"] = None
+                        else:
+                            payload_fin["data_contrato"] = None
+
+                        # upsert via cod4
+                        r_chk = (supabase.table("obras_financeiro")
+                                 .select("cod4").eq("cod4", cod4_key).execute())
+                        if r_chk.data:
+                            supabase.table("obras_financeiro").update(payload_fin)\
+                                .eq("cod4", cod4_key).execute()
+                        else:
+                            payload_fin["cod4"] = cod4_key
+                            supabase.table("obras_financeiro").insert(payload_fin).execute()
+                        ok2 += 1
+                    except Exception as _ex2:
+                        erros2.append(f"cod4 {cod4_key}: {_ex2}")
+                try: _ed_fin.clear()
+                except: pass
+                try: carregar_obras_completo.clear()
+                except: pass
+                if erros2:
+                    st.error(f"❌ {len(erros2)} erro(s):\n" + "\n".join(erros2))
+                else:
+                    st.success(f"✅ {ok2} obra(s) atualizadas no financeiro!")
+
+        # ── Mapa de correlação entre tabelas ─────────────────────────────────
+        with st.expander("🔗 Mapa de correlação entre tabelas do banco", expanded=False):
+            st.markdown("""
+| Tabela | Chave | Conecta com |
+|--------|-------|-------------|
+| `obras` | `id`, `cod4` | **tabela mestre** |
+| `obras_financeiro` | `cod4` | `obras.cod4` |
+| `obras_tarefas` | `obra_id` | `obras.id` |
+| `producao_fabricacao` | `obra_id` + `cod4_obra` | `obras.id` / `obras.cod4` |
+| `producao_transporte` | `obra_id` + `cod4_obra` | `obras.id` / `obras.cod4` |
+| `producao_montagem` | `obra_id` + `cod4_obra` | `obras.id` / `obras.cod4` |
+| `medicoes` | `obra_id` | `obras.id` |
+| `custos` | — | via `centro_custos` (4 dígitos iniciais) |
+| `folha` | `obra_id` | `obras.id` |
+
+**Chave universal:** `cod4` (4 dígitos numéricos) — presente em todas as tabelas, diretamente ou como prefixo de texto.
+
+Para cruzar **custos** com obras nos dashboards: `SUBSTRING(centro_custos, 1, 4)` = `obras.cod4`.
+            """)
