@@ -5265,10 +5265,13 @@ elif pagina_selecionada == "💸 Custos & Despesas":
 
     def _enriquecer_df(df):
         """Adiciona colunas derivadas: mes, ano, cod4, tipo_centro, grupo_custo.
-        Totalmente vetorizado — sem apply() linha a linha."""
+        Totalmente vetorizado — sem apply() linha a linha.
+        valor_global = valor original com sinal (estornos ficam negativos)
+        valor_abs    = abs() para gráficos e somas"""
         df = df.copy()
         df["data"]         = pd.to_datetime(df["data"], errors="coerce")
-        df["valor_global"] = pd.to_numeric(df["valor_global"], errors="coerce").abs()
+        df["valor_global"] = pd.to_numeric(df["valor_global"], errors="coerce")
+        df["valor_abs"]    = df["valor_global"].abs()
         df["mes"]          = df["data"].dt.to_period("M").astype(str)
         df["ano"]          = df["data"].dt.year.astype(str)
 
@@ -5433,7 +5436,7 @@ elif pagina_selecionada == "💸 Custos & Despesas":
 
     _cols_comuns = ["data","mes","ano","cod4","centro_custos","conta_gerencial",
                     "conta_macro","cli_fornecedor","produto_servico","criado_por",
-                    "valor_global","origem","tipo_centro","grupo_custo",
+                    "valor_global","valor_abs","origem","tipo_centro","grupo_custo",
                     "cod_tipo_doc","id_lancamento"]
     def _sel_cols(df, cols):
         return df[[c for c in cols if c in df.columns]]
@@ -5474,24 +5477,19 @@ elif pagina_selecionada == "💸 Custos & Despesas":
                                       default=["Custo", "Despesa"], key="cd_origem")
 
     with flt3:
-        _tipos_centro_sel = st.multiselect(
-            "Tipo de Centro",
-            ["Direto (Obra)", "Indireto (Fábrica)", "Equipamento", "Outros"],
-            default=["Direto (Obra)", "Indireto (Fábrica)", "Equipamento", "Outros"],
-            key="cd_tipo_centro"
-        )
+        _centros_disp = sorted(df_all["centro_custos"].dropna().unique().tolist())
+        _centros_sel  = st.multiselect("Centro de Custos", _centros_disp,
+                                       default=[], key="cd_centro_custos",
+                                       placeholder="Todos os centros")
 
     with flt4:
-        _grupos_sel = st.multiselect(
-            "Grupo de Custo",
-            list(_COR_GRUPO.keys()),
-            default=list(_COR_GRUPO.keys()),
-            key="cd_grupo"
-        )
+        _macros_disp = sorted(df_all["conta_macro"].dropna().unique().tolist())
+        _contas_macro_sel = st.multiselect("Conta Macro", _macros_disp,
+                                           default=[], key="cd_conta_macro",
+                                           placeholder="Todas")
 
     with flt5:
-        _cod4s_disp = sorted(df_all["cod4"].dropna().unique().tolist())
-        _obra_sel = st.selectbox("Obra", ["Todas"] + _cod4s_disp, key="cd_obra")
+        st.write("")  # espaçamento
 
     # Aplicar filtros
     df_fil = df_all.copy()
@@ -5501,33 +5499,28 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         df_fil = df_fil[df_fil["data"] <= pd.Timestamp(_dt_fim)]
     if _origens_sel:
         df_fil = df_fil[df_fil["origem"].isin(_origens_sel)]
-    if _tipos_centro_sel:
-        df_fil = df_fil[df_fil["tipo_centro"].isin(_tipos_centro_sel)]
-    if _grupos_sel:
-        df_fil = df_fil[df_fil["grupo_custo"].isin(_grupos_sel)]
-    if _obra_sel != "Todas":
-        df_fil = df_fil[df_fil["cod4"] == _obra_sel]
-        st.info(f"Modo drill-through ativo para obra **{_obra_sel}**")
+    if _centros_sel:
+        df_fil = df_fil[df_fil["centro_custos"].isin(_centros_sel)]
+    if _contas_macro_sel:
+        df_fil = df_fil[df_fil["conta_macro"].isin(_contas_macro_sel)]
 
     if df_fil.empty:
         st.warning("Nenhum registro encontrado com os filtros aplicados.")
         st.stop()
 
     # ── KPIs globais ─────────────────────────────────────────
-    _tot      = df_fil["valor_global"].sum()
-    _dir      = df_fil.loc[df_fil["tipo_centro"] == "Direto (Obra)", "valor_global"].sum()
-    _indir    = df_fil.loc[df_fil["tipo_centro"] == "Indireto (Fábrica)", "valor_global"].sum()
-    _equip    = df_fil.loc[df_fil["tipo_centro"] == "Equipamento", "valor_global"].sum()
-    _desp_adm = df_fil.loc[df_fil["origem"] == "Despesa", "valor_global"].sum()
-    _pct_dir  = (_dir / _tot * 100) if _tot > 0 else 0
+    _tot      = df_fil["valor_abs"].sum()
+    _tot_cus  = df_fil.loc[df_fil["origem"] == "Custo",   "valor_abs"].sum()
+    _tot_des  = df_fil.loc[df_fil["origem"] == "Despesa", "valor_abs"].sum()
+    _n_lanc   = len(df_fil)
+    _ticket   = _tot / _n_lanc if _n_lanc > 0 else 0
 
-    kc1, kc2, kc3, kc4, kc5, kc6 = st.columns(6)
-    kc1.metric("💰 Custo Total",        fmt_brl(_tot))
-    kc2.metric("🏗️ Direto",             fmt_brl(_dir))
-    kc3.metric("🏭 Indireto (Fábrica)", fmt_brl(_indir))
-    kc4.metric("🚛 Equipamentos",        fmt_brl(_equip))
-    kc5.metric("📋 Despesas ADM",        fmt_brl(_desp_adm))
-    kc6.metric("% Direto",              f"{_pct_dir:.1f}%")
+    kc1, kc2, kc3, kc4, kc5 = st.columns(5)
+    kc1.metric("💰 Total do Período",   fmt_brl(_tot))
+    kc2.metric("🏗️ Total Custos",       fmt_brl(_tot_cus))
+    kc3.metric("📋 Total Despesas",      fmt_brl(_tot_des))
+    kc4.metric("🔢 Nº de Lançamentos",  f"{_n_lanc:,}".replace(",", "."))
+    kc5.metric("🎯 Ticket Médio",        fmt_brl(_ticket))
 
     # ── Abas ─────────────────────────────────────────────────
     aba1, aba2, aba3, aba4, aba5, aba6 = st.tabs([
@@ -5540,15 +5533,16 @@ elif pagina_selecionada == "💸 Custos & Despesas":
     ])
 
     # ── Componente drill-through ─────────────────────────────
-    def _drill_through(df, titulo):
+    def _drill_through(df, titulo, prefixo="dt"):
         st.divider()
         st.markdown(f"#### 🔍 Drill-Through: {titulo}")
         dc1, dc2, dc3 = st.columns(3)
-        _busca_for = dc1.text_input("Buscar fornecedor", key=f"cd_dt_for_{titulo[:10]}")
+        _k = f"cd_{prefixo}_{titulo[:8]}"
+        _busca_for = dc1.text_input("Buscar fornecedor", key=f"{_k}_for")
         _contas    = ["Todas"] + sorted(df["conta_gerencial"].dropna().unique().tolist())
-        _fil_cg    = dc2.selectbox("Conta Gerencial", _contas, key=f"cd_dt_cg_{titulo[:10]}")
+        _fil_cg    = dc2.selectbox("Conta Gerencial", _contas, key=f"{_k}_cg")
         _meses_dt  = ["Todos"] + sorted(df["mes"].dropna().unique().tolist(), reverse=True)
-        _fil_mes   = dc3.selectbox("Mês", _meses_dt, key=f"cd_dt_mes_{titulo[:10]}")
+        _fil_mes   = dc3.selectbox("Mês", _meses_dt, key=f"{_k}_mes")
 
         df_dt = df.copy()
         if _busca_for:
@@ -5559,6 +5553,7 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         if _fil_mes != "Todos":
             df_dt = df_dt[df_dt["mes"] == _fil_mes]
 
+        # Mostra valor_global original (com sinal) no drill-through
         _cols_dt = ["data","centro_custos","conta_gerencial","cli_fornecedor",
                     "produto_servico","criado_por","valor_global"]
         _cols_dt_ok = [c for c in _cols_dt if c in df_dt.columns]
@@ -5573,17 +5568,35 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         })
         st.dataframe(df_dt_show, use_container_width=True, hide_index=True,
                      height=max(300, min(600, 36 + 35 * len(df_dt_show))))
-        st.caption(f"**{len(df_dt_show)}** lançamentos · Total: {fmt_brl(df_dt['valor_global'].sum())}")
+        st.caption(f"**{len(df_dt_show)}** lançamentos · Total: {fmt_brl(df_dt['valor_abs'].sum() if 'valor_abs' in df_dt.columns else df_dt['valor_global'].abs().sum())}")
 
     # ════════════════════════════════════════════════════════
     # ABA 1 — Visão Geral
     # ════════════════════════════════════════════════════════
     with aba1:
+        # Filtros internos da aba
+        vg_f1, vg_f2 = st.columns(2)
+        _vg_grupos = vg_f1.multiselect(
+            "Grupo de Custo", list(_COR_GRUPO.keys()),
+            default=list(_COR_GRUPO.keys()), key="cd_vg_grupo"
+        )
+        _vg_tipos = vg_f2.multiselect(
+            "Tipo de Centro",
+            ["Direto (Obra)", "Indireto (Fábrica)", "Equipamento", "Outros"],
+            default=["Direto (Obra)", "Indireto (Fábrica)", "Equipamento", "Outros"],
+            key="cd_vg_tipo"
+        )
+        df_vg = df_fil.copy()
+        if _vg_grupos:
+            df_vg = df_vg[df_vg["grupo_custo"].isin(_vg_grupos)]
+        if _vg_tipos:
+            df_vg = df_vg[df_vg["tipo_centro"].isin(_vg_tipos)]
+
         # Bloco A — Evolução mensal empilhada
         st.subheader("Evolução Mensal por Grupo")
-        _ev = (df_fil.groupby(["mes","grupo_custo"])["valor_global"]
+        _ev = (df_vg.groupby(["mes","grupo_custo"])["valor_abs"]
                .sum().reset_index())
-        _ev_tot = df_fil.groupby("mes")["valor_global"].sum().reset_index()
+        _ev_tot = df_vg.groupby("mes")["valor_abs"].sum().reset_index()
         _ev_tot.columns = ["mes","total"]
 
         _meses_ord = sorted(_ev["mes"].unique())
@@ -5592,10 +5605,10 @@ elif pagina_selecionada == "💸 Custos & Despesas":
             _d = _ev[_ev["grupo_custo"] == _grp]
             if _d.empty:
                 continue
-            _d = (_d.set_index("mes")[["valor_global"]]
+            _d = (_d.set_index("mes")[["valor_abs"]]
                   .reindex(_meses_ord, fill_value=0).reset_index())
             fig_ev.add_trace(go.Bar(
-                x=_d["mes"], y=_d["valor_global"],
+                x=_d["mes"], y=_d["valor_abs"],
                 name=_grp, marker_color=_cor,
                 hovertemplate=f"<b>{_grp}</b><br>%{{x}}<br>R$ %{{y:,.0f}}<extra></extra>"
             ))
@@ -5618,11 +5631,11 @@ elif pagina_selecionada == "💸 Custos & Despesas":
 
         # Bloco B — Mapa de calor de sazonalidade
         st.subheader("Sazonalidade Mensal")
-        _heat = df_fil.copy()
+        _heat = df_vg.copy()
         _heat["mes_num"] = _heat["data"].dt.month
         _heat["ano_str"] = _heat["data"].dt.year.astype(str)
         _pivot = _heat.pivot_table(index="ano_str", columns="mes_num",
-                                   values="valor_global", aggfunc="sum")
+                                   values="valor_abs", aggfunc="sum")
         _meses_pt = {1:"Jan",2:"Fev",3:"Mar",4:"Abr",5:"Mai",6:"Jun",
                      7:"Jul",8:"Ago",9:"Set",10:"Out",11:"Nov",12:"Dez"}
         _pivot.columns = [_meses_pt.get(c, str(c)) for c in _pivot.columns]
@@ -5640,7 +5653,7 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         st.subheader("Composição")
         dc1, dc2 = st.columns(2)
         with dc1:
-            _grp_vals = df_fil.groupby("grupo_custo")["valor_global"].sum()
+            _grp_vals = df_vg.groupby("grupo_custo")["valor_abs"].sum()
             fig_d1 = go.Figure(go.Pie(
                 labels=_grp_vals.index, values=_grp_vals.values,
                 hole=0.42,
@@ -5651,7 +5664,7 @@ elif pagina_selecionada == "💸 Custos & Despesas":
                                   margin=dict(t=40, b=10))
             st.plotly_chart(fig_d1, use_container_width=True)
         with dc2:
-            _tc_vals = df_fil.groupby("tipo_centro")["valor_global"].sum()
+            _tc_vals = df_vg.groupby("tipo_centro")["valor_abs"].sum()
             fig_d2 = go.Figure(go.Pie(
                 labels=_tc_vals.index, values=_tc_vals.values,
                 hole=0.42,
@@ -5662,25 +5675,65 @@ elif pagina_selecionada == "💸 Custos & Despesas":
                                   margin=dict(t=40, b=10))
             st.plotly_chart(fig_d2, use_container_width=True)
 
-        if _obra_sel != "Todas":
-            _drill_through(df_fil, f"Obra {_obra_sel}")
+        # Bloco D — Top 20 Centros de Custo
+        st.subheader("Distribuição por Centro de Custos (Top 20)")
+        _cc_top = (df_vg.groupby("centro_custos")["valor_abs"].sum()
+                   .reset_index()
+                   .rename(columns={"centro_custos": "centro", "valor_abs": "valor"})
+                   .sort_values("valor", ascending=False).head(20))
+        if not _cc_top.empty:
+            _cc_top["tipo_centro"] = _cc_top["centro"].apply(
+                lambda cc: (
+                    "Direto (Obra)"      if re.match(r"^\d{4}", str(cc)) else
+                    "Equipamento"        if any(k in str(cc).upper() for k in
+                        ["CAMINHÃO","CAMINHAO","PÓRTICO","PORTICO","BETONEIRA","MUNCK","MÁQUINA","MAQUINA"]) else
+                    "Indireto (Fábrica)" if any(k in str(cc).upper() for k in
+                        ["PRODUÇÃO","PRODUCAO","LABORATÓRIO","LABORATORIO","MONTAGEM","MANUTENÇÃO","MANUTENCAO"]) else
+                    "Outros"
+                )
+            )
+            fig_cc = go.Figure(go.Bar(
+                x=_cc_top["valor"], y=_cc_top["centro"],
+                orientation="h",
+                marker_color=[_COR_TIPO.get(t, "#9E9E9E") for t in _cc_top["tipo_centro"]],
+                hovertemplate="<b>%{y}</b><br>R$ %{x:,.0f}<extra></extra>"
+            ))
+            fig_cc.update_layout(
+                height=500, hovermode="y unified",
+                xaxis_title="Valor (R$)",
+                yaxis=dict(autorange="reversed"),
+                margin=dict(t=20, b=40)
+            )
+            st.plotly_chart(fig_cc, use_container_width=True)
 
     # ════════════════════════════════════════════════════════
     # ABA 2 — Curva ABC
     # ════════════════════════════════════════════════════════
     with aba2:
-        _dim_abc = st.radio(
+        abc_r1, abc_r2 = st.columns([3, 1])
+        _dim_abc = abc_r1.radio(
             "Dimensão de análise",
-            ["Por Fornecedor", "Por Conta Gerencial", "Por Centro de Custo"],
+            ["Por Fornecedor (Cli/For)", "Por Conta Gerencial", "Por Centro de Custo",
+             "Por Conta Macro", "Por Produto/Serviço"],
             horizontal=True, key="cd_dim_abc"
         )
-        _col_abc = {"Por Fornecedor": "cli_fornecedor",
-                    "Por Conta Gerencial": "conta_gerencial",
-                    "Por Centro de Custo": "centro_custos"}[_dim_abc]
+        _col_abc = {
+            "Por Fornecedor (Cli/For)": "cli_fornecedor",
+            "Por Conta Gerencial":      "conta_gerencial",
+            "Por Centro de Custo":      "centro_custos",
+            "Por Conta Macro":          "conta_macro",
+            "Por Produto/Serviço":      "produto_servico",
+        }[_dim_abc]
+        _abc_orig = abc_r2.radio("Origem", ["Todos","Custo","Despesa"],
+                                  horizontal=True, key="cd_abc_origem")
 
-        _abc = (df_fil.groupby(_col_abc, dropna=False)["valor_global"]
+        _df_abc_base = df_fil.copy()
+        if _abc_orig != "Todos":
+            _df_abc_base = _df_abc_base[_df_abc_base["origem"] == _abc_orig]
+
+        _abc = (_df_abc_base.groupby(_col_abc, dropna=False)["valor_abs"]
                 .sum().reset_index()
-                .rename(columns={_col_abc: "nome", "valor_global": "valor"})
+                .rename(columns={_col_abc: "nome", "valor_abs": "valor"})
                 .sort_values("valor", ascending=False).reset_index(drop=True))
         _tot_abc = _abc["valor"].sum()
         _abc["pct_individual"] = _abc["valor"] / _tot_abc * 100
@@ -5757,19 +5810,27 @@ elif pagina_selecionada == "💸 Custos & Despesas":
             _item_sel = _abc.iloc[_sel_rows_abc[0]]["nome"]
             st.session_state["custos_drill_item"]    = _item_sel
             st.session_state["custos_drill_dimensao"] = _col_abc
-            _df_drill = df_fil[df_fil[_col_abc].fillna("").astype(str) == str(_item_sel)]
-            _drill_through(_df_drill, str(_item_sel))
+            _df_drill = _df_abc_base[_df_abc_base[_col_abc].fillna("").astype(str) == str(_item_sel)]
+            _drill_through(_df_drill, str(_item_sel), prefixo="abc")
 
     # ════════════════════════════════════════════════════════
     # ABA 3 — Padrão & Anomalias
     # ════════════════════════════════════════════════════════
     with aba3:
         # Bloco A — Detector de anomalias
-        st.subheader("Detector de Anomalias por Conta Gerencial")
+        _anom_dim_map = {
+            "Conta Gerencial":  "conta_gerencial",
+            "Centro de Custos": "centro_custos",
+            "Conta Macro":      "conta_macro",
+        }
+        _anom_dim_lbl = st.radio("Dimensão de análise", list(_anom_dim_map.keys()),
+                                  horizontal=True, key="cd_anom_dim")
+        _col_anom = _anom_dim_map[_anom_dim_lbl]
+        st.subheader(f"Detector de Anomalias por {_anom_dim_lbl}")
         _anom_rows = []
         _mes_rec = df_fil["mes"].max()
-        for _cg in df_fil["conta_gerencial"].dropna().unique():
-            _sub = df_fil[df_fil["conta_gerencial"] == _cg].groupby("mes")["valor_global"].sum()
+        for _item_a in df_fil[_col_anom].dropna().unique():
+            _sub = df_fil[df_fil[_col_anom] == _item_a].groupby("mes")["valor_abs"].sum()
             if len(_sub) < 2:
                 continue
             _med = _sub.mean()
@@ -5781,20 +5842,37 @@ elif pagina_selecionada == "💸 Custos & Despesas":
             _status = ("🔴 Anomalia" if abs(_sig) > 2 else
                        "🟡 Atenção" if abs(_sig) > 1 else "🟢 Normal")
             _anom_rows.append({
-                "Conta Gerencial": _cg,
+                _anom_dim_lbl:      _item_a,
                 "Média Mensal (R$)": _med,
-                "Último Mês (R$)": _ult,
-                "Δ vs Média": _ult - _med,
-                "Desvio (σ)": round(_sig, 2),
-                "Status": _status,
-                "_abs_sig": abs(_sig),
+                "Último Mês (R$)":  _ult,
+                "Δ vs Média":       _ult - _med,
+                "Desvio (σ)":       round(_sig, 2),
+                "Status":           _status,
+                "_abs_sig":         abs(_sig),
+                "_abs_delta":       abs(_ult - _med),
             })
         if _anom_rows:
-            _df_anom = pd.DataFrame(_anom_rows).sort_values("_abs_sig", ascending=False).drop(columns=["_abs_sig"])
+            _df_anom = (pd.DataFrame(_anom_rows)
+                        .sort_values("_abs_sig", ascending=False)
+                        .drop(columns=["_abs_sig","_abs_delta"]))
             st.dataframe(_df_anom, use_container_width=True, hide_index=True,
                          column_config={
                              "Média Mensal (R$)": st.column_config.NumberColumn(format="R$ %.0f"),
                              "Último Mês (R$)":   st.column_config.NumberColumn(format="R$ %.0f"),
+                             "Δ vs Média":         st.column_config.NumberColumn(format="R$ %.0f"),
+                         })
+
+            # Maiores variações absolutas (Top 10 em R$)
+            st.subheader("Maiores Variações Absolutas (Top 10 em R$)")
+            _df_var10 = (pd.DataFrame(_anom_rows)
+                         .sort_values("_abs_delta", ascending=False)
+                         .head(10)
+                         .drop(columns=["_abs_sig","_abs_delta"])
+                         [[_anom_dim_lbl, "Último Mês (R$)", "Média Mensal (R$)", "Δ vs Média", "Status"]])
+            st.dataframe(_df_var10, use_container_width=True, hide_index=True,
+                         column_config={
+                             "Último Mês (R$)":   st.column_config.NumberColumn(format="R$ %.0f"),
+                             "Média Mensal (R$)": st.column_config.NumberColumn(format="R$ %.0f"),
                              "Δ vs Média":         st.column_config.NumberColumn(format="R$ %.0f"),
                          })
         else:
@@ -5802,21 +5880,16 @@ elif pagina_selecionada == "💸 Custos & Despesas":
 
         # Bloco B — Dispersão
         st.subheader("Dispersão de Lançamentos Individuais")
-        _p95 = df_fil["valor_global"].quantile(0.95)
+        _p95 = df_fil["valor_abs"].quantile(0.95)
         _df_disp = df_fil.copy()
-        _df_disp["_tamanho"] = _df_disp["valor_global"].apply(
-            lambda v: 12 if v >= _p95 else 5)
-        _df_disp["_cor_disp"] = _df_disp.apply(
-            lambda r: "#E53935" if r["valor_global"] >= _p95
-            else _COR_GRUPO.get(r["grupo_custo"], "#9E9E9E"), axis=1)
 
         fig_disp = go.Figure()
         for _grp, _cor in _COR_GRUPO.items():
-            _dd = _df_disp[(_df_disp["grupo_custo"] == _grp) & (_df_disp["valor_global"] < _p95)]
+            _dd = _df_disp[(_df_disp["grupo_custo"] == _grp) & (_df_disp["valor_abs"] < _p95)]
             if _dd.empty:
                 continue
             fig_disp.add_trace(go.Scatter(
-                x=_dd["data"], y=_dd["valor_global"],
+                x=_dd["data"], y=_dd["valor_abs"],
                 mode="markers", name=_grp,
                 marker=dict(color=_cor, size=5, opacity=0.6),
                 hovertemplate=(
@@ -5828,10 +5901,10 @@ elif pagina_selecionada == "💸 Custos & Despesas":
                 ),
                 customdata=_dd[["cli_fornecedor","conta_gerencial","cli_fornecedor","centro_custos"]].fillna("—").values
             ))
-        _dd_out = _df_disp[_df_disp["valor_global"] >= _p95]
+        _dd_out = _df_disp[_df_disp["valor_abs"] >= _p95]
         if not _dd_out.empty:
             fig_disp.add_trace(go.Scatter(
-                x=_dd_out["data"], y=_dd_out["valor_global"],
+                x=_dd_out["data"], y=_dd_out["valor_abs"],
                 mode="markers", name="≥ P95",
                 marker=dict(color="#E53935", size=12, symbol="diamond"),
                 hovertemplate=(
@@ -5849,24 +5922,34 @@ elif pagina_selecionada == "💸 Custos & Despesas":
 
         # Bloco C — Comparativo mês a mês
         st.subheader("Comparativo Mês a Mês")
+        _comp_dim_map = {
+            "Conta Gerencial":       "conta_gerencial",
+            "Centro de Custos":      "centro_custos",
+            "Conta Macro":           "conta_macro",
+            "Fornecedor (Cli/For)":  "cli_fornecedor",
+        }
+        _comp_dim_lbl = st.radio("Agrupar por", list(_comp_dim_map.keys()),
+                                  horizontal=True, key="cd_comp_dim")
+        _col_comp = _comp_dim_map[_comp_dim_lbl]
+
         _meses_disp = sorted(df_fil["mes"].dropna().unique(), reverse=True)
         if len(_meses_disp) >= 2:
             cc1, cc2 = st.columns(2)
             _mes_a = cc1.selectbox("Mês A", _meses_disp, index=0, key="cd_mes_a")
             _mes_b = cc2.selectbox("Mês B", _meses_disp, index=1, key="cd_mes_b")
             _df_ma = (df_fil[df_fil["mes"] == _mes_a]
-                      .groupby("conta_gerencial")["valor_global"].sum()
-                      .reset_index().rename(columns={"valor_global":"val_a"}))
+                      .groupby(_col_comp)["valor_abs"].sum()
+                      .reset_index().rename(columns={"valor_abs":"val_a"}))
             _df_mb = (df_fil[df_fil["mes"] == _mes_b]
-                      .groupby("conta_gerencial")["valor_global"].sum()
-                      .reset_index().rename(columns={"valor_global":"val_b"}))
-            _df_comp = _df_ma.merge(_df_mb, on="conta_gerencial", how="outer").fillna(0)
+                      .groupby(_col_comp)["valor_abs"].sum()
+                      .reset_index().rename(columns={"valor_abs":"val_b"}))
+            _df_comp = _df_ma.merge(_df_mb, on=_col_comp, how="outer").fillna(0)
             _df_comp["Δ Valor"]   = _df_comp["val_a"] - _df_comp["val_b"]
             _df_comp["Δ %"]       = (_df_comp["Δ Valor"] / _df_comp["val_b"].replace(0, float("nan")) * 100).fillna(0)
             _df_comp = _df_comp.sort_values("val_a", ascending=False)
             st.dataframe(
                 _df_comp.rename(columns={
-                    "conta_gerencial": "Conta Gerencial",
+                    _col_comp: _comp_dim_lbl,
                     "val_a": f"Mês {_mes_a} (R$)",
                     "val_b": f"Mês {_mes_b} (R$)",
                 }),
@@ -5881,13 +5964,16 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         else:
             st.info("São necessários pelo menos 2 meses de dados para o comparativo.")
 
-        if _obra_sel != "Todas":
-            _drill_through(df_fil, f"Obra {_obra_sel}")
-
     # ════════════════════════════════════════════════════════
     # ABA 4 — Faturamento Direto
     # ════════════════════════════════════════════════════════
     with aba4:
+        st.info(
+            "Esta aba analisa exclusivamente o faturamento direto (notas de terceiros cobradas ao "
+            "cliente via medições) e o confronta com os custos de insumos registrados. "
+            "Os dados vêm de fontes distintas: **Medições** (o que foi cobrado ao cliente) "
+            "e **Custos** (o que a empresa pagou)."
+        )
         with st.spinner("Carregando medições..."):
             df_med = carregar_medicoes_faturamento()
 
@@ -5911,7 +5997,7 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         _tot_fat_dir = _df_med_dir["valor"].sum() if not _df_med_dir.empty else 0
         _tot_ins_fab = df_fil.loc[
             (df_fil["grupo_custo"] == "Insumos Estruturais") &
-            (df_fil["tipo_centro"] == "Indireto (Fábrica)"), "valor_global"
+            (df_fil["tipo_centro"] == "Indireto (Fábrica)"), "valor_abs"
         ].sum()
         _margem_rep  = _tot_fat_dir - _tot_ins_fab
         _tot_med_all = df_med["valor"].sum() if not df_med.empty else 0
@@ -5938,7 +6024,7 @@ elif pagina_selecionada == "💸 Custos & Despesas":
             ]["valor"].sum() if not _df_med_dir.empty else 0
             _v_cus = df_fil[
                 df_fil["conta_gerencial"].fillna("").str.upper().str.contains(_cg_kw, na=False)
-            ]["valor_global"].sum()
+            ]["valor_abs"].sum()
             _dif = _v_fat - _v_cus
             _marg = (_dif / _v_fat * 100) if _v_fat > 0 else 0
             _confronto.append({
@@ -5959,8 +6045,8 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         # Gráfico por obra
         _df_ins_obra = (df_fil[df_fil["grupo_custo"] == "Insumos Estruturais"]
                         .dropna(subset=["cod4"])
-                        .groupby("cod4")["valor_global"].sum().reset_index()
-                        .rename(columns={"cod4":"obra","valor_global":"custo"}))
+                        .groupby("cod4")["valor_abs"].sum().reset_index()
+                        .rename(columns={"cod4":"obra","valor_abs":"custo"}))
         if not _df_ins_obra.empty and not _df_med_dir.empty:
             st.subheader("Custo vs Faturamento por Obra")
             _mob_p = mapa_obras()
@@ -5983,9 +6069,6 @@ elif pagina_selecionada == "💸 Custos & Despesas":
                                   margin=dict(t=20, b=40))
             st.plotly_chart(fig_cv, use_container_width=True)
 
-        if _obra_sel != "Todas":
-            _drill_through(df_fil, f"Obra {_obra_sel}")
-
     # ════════════════════════════════════════════════════════
     # ABA 5 — Custo por m³
     # ════════════════════════════════════════════════════════
@@ -5993,9 +6076,26 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         with st.spinner("Carregando volume de produção..."):
             vol_mes = carregar_producao_mensal()
 
+        m3_c1, m3_c2 = st.columns(2)
         _grps_m3 = list(_COR_GRUPO.keys()) + ["Total (todos os grupos)"]
-        _sel_ins = st.selectbox("Grupo para análise de custo/m³", _grps_m3,
-                                index=len(_grps_m3)-1, key="cd_sel_ins")
+        _sel_ins = m3_c1.selectbox("Grupo para análise de custo/m³", _grps_m3,
+                                   index=len(_grps_m3)-1, key="cd_sel_ins")
+
+        # Seletor de Centro de Custo para filtrar o cálculo
+        _palavras_prod = ["PRODUÇÃO","PRODUCAO","LABORATÓRIO","LABORATORIO",
+                          "MONTAGEM","MANUTENÇÃO","MANUTENCAO"]
+        _centros_prod = sorted([
+            c for c in df_fil["centro_custos"].dropna().unique()
+            if any(p in str(c).upper() for p in _palavras_prod)
+        ])
+        _sel_m3_centro = m3_c2.selectbox(
+            "Centro de Custo (opcional)",
+            ["Todos os centros"] + _centros_prod,
+            key="cd_m3_centro"
+        )
+        df_m3 = df_fil.copy()
+        if _sel_m3_centro != "Todos os centros":
+            df_m3 = df_m3[df_m3["centro_custos"] == _sel_m3_centro]
 
         # Mês mais recente com volume
         _vol_pos = vol_mes[vol_mes > 0] if not vol_mes.empty else pd.Series(dtype=float)
@@ -6005,40 +6105,40 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         if _mes_rec_v:
             _vol_rec = _vol_pos[_mes_rec_v]
             def _custo_mes_rec(grp_filtro=None, cg_filtro=None):
-                _mask = df_fil["mes"] == _mes_rec_v
+                _mask = df_m3["mes"] == _mes_rec_v
                 if grp_filtro:
-                    _mask &= df_fil["grupo_custo"] == grp_filtro
+                    _mask &= df_m3["grupo_custo"] == grp_filtro
                 if cg_filtro:
-                    _mask &= df_fil["conta_gerencial"].str.upper().str.strip() == cg_filtro
-                return df_fil.loc[_mask, "valor_global"].sum()
+                    _mask &= df_m3["conta_gerencial"].str.upper().str.strip() == cg_filtro
+                return df_m3.loc[_mask, "valor_abs"].sum()
 
             def _rpm3_hist(grp_filtro=None, cg_filtro=None):
-                _sub = df_fil.copy()
+                _sub = df_m3.copy()
                 if grp_filtro:
                     _sub = _sub[_sub["grupo_custo"] == grp_filtro]
                 if cg_filtro:
                     _sub = _sub[_sub["conta_gerencial"].str.upper().str.strip() == cg_filtro]
-                _c_mes = _sub.groupby("mes")["valor_global"].sum()
-                _df_m = pd.DataFrame({"custo": _c_mes}).join(vol_mes.rename("vol"), how="inner")
-                _df_m = _df_m[_df_m["vol"] > 0]
-                if _df_m.empty:
+                _c_mes = _sub.groupby("mes")["valor_abs"].sum()
+                _df_mv = pd.DataFrame({"custo": _c_mes}).join(vol_mes.rename("vol"), how="inner")
+                _df_mv = _df_mv[_df_mv["vol"] > 0]
+                if _df_mv.empty:
                     return None, None
-                _r = _df_m["custo"] / _df_m["vol"]
+                _r = _df_mv["custo"] / _df_mv["vol"]
                 return _r.mean(), _r.std()
 
             st.subheader(f"Custo/m³ — {_mes_rec_v}")
-            _m1, _m2, _m3, _m4, _m5 = st.columns(5)
+            _m1, _m2, _m3c, _m4, _m5 = st.columns(5)
             for _col_met, _lbl, _grp_f, _cg_f in [
-                (_m1, "Pessoal + Ben./m³", None, None),
-                (_m2, "Insumos Estr./m³",  "Insumos Estruturais", None),
-                (_m3, "Materiais Cons./m³", "Materiais de Consumo", None),
-                (_m4, "Logística/m³",       "Logística", None),
-                (_m5, "Total Geral/m³",     None, None),
+                (_m1,  "Pessoal + Ben./m³", None, None),
+                (_m2,  "Insumos Estr./m³",  "Insumos Estruturais", None),
+                (_m3c, "Materiais Cons./m³", "Materiais de Consumo", None),
+                (_m4,  "Logística/m³",       "Logística", None),
+                (_m5,  "Total Geral/m³",     None, None),
             ]:
                 if _lbl == "Pessoal + Ben./m³":
-                    _c = (df_fil.loc[(df_fil["mes"] == _mes_rec_v) &
-                                     (df_fil["grupo_custo"].isin(["Pessoal","Benefícios"])),
-                                     "valor_global"].sum())
+                    _c = (df_m3.loc[(df_m3["mes"] == _mes_rec_v) &
+                                    (df_m3["grupo_custo"].isin(["Pessoal","Benefícios"])),
+                                    "valor_abs"].sum())
                     _med, _ = _rpm3_hist()
                 elif _lbl == "Total Geral/m³":
                     _c = _custo_mes_rec()
@@ -6079,10 +6179,10 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         # Bloco B — Gráfico de evolução custo/m³
         st.subheader("Evolução do Custo/m³")
         if _sel_ins == "Total (todos os grupos)":
-            _c_mensal = df_fil.groupby("mes")["valor_global"].sum()
+            _c_mensal = df_m3.groupby("mes")["valor_abs"].sum()
         else:
-            _c_mensal = (df_fil[df_fil["grupo_custo"] == _sel_ins]
-                         .groupby("mes")["valor_global"].sum())
+            _c_mensal = (df_m3[df_m3["grupo_custo"] == _sel_ins]
+                         .groupby("mes")["valor_abs"].sum())
         _df_rpm3 = pd.DataFrame({"custo": _c_mensal}).join(vol_mes.rename("vol"), how="inner")
         _df_rpm3 = _df_rpm3[_df_rpm3["vol"] > 0].copy()
         _df_rpm3["rpm3"] = _df_rpm3["custo"] / _df_rpm3["vol"]
@@ -6167,9 +6267,6 @@ elif pagina_selecionada == "💸 Custos & Despesas":
             fig_h2.update_layout(height=max(180, min(70 * len(_piv2), 400)),
                                   margin=dict(t=20, b=20))
             st.plotly_chart(fig_h2, use_container_width=True)
-
-        if _obra_sel != "Todas":
-            _drill_through(df_fil, f"Obra {_obra_sel}")
 
     # ════════════════════════════════════════════════════════
     # ABA 6 — Tributos
