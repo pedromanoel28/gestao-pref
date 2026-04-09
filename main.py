@@ -490,17 +490,30 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             df3.columns[i]: nomes3[i]
                             for i in range(min(len(df3.columns), len(nomes3)))
                         })
-                        mask_cancel3 = (df3["tipo"].str.strip().str.upper()
+
+                        # Remove canceladas
+                        mask_cancel3 = (df3["tipo"].fillna("").str.strip().str.upper()
                                         == "NOTA FISCAL CANCELADA")
                         n_cancel3 = int(mask_cancel3.sum())
                         df3 = df3[~mask_cancel3].copy()
+
+                        # Converte datas
                         df3["data_emissao"]    = formatar_data(df3["data_emissao"])
                         df3["data_vencimento"] = formatar_data(df3["data_vencimento"])
-                        df3["valor"]           = formatar_numero(df3["valor"])
+
+                        # Converte valor — suporta "R$ 189.916,51" e "189916.51"
+                        df3["valor"] = df3["valor"].apply(lambda v: _limpar_num_imp(v))
+
+                        # Vincula obra
                         mob3 = mapa_obras()
                         df3["obra_id"] = aplicar_obra_id(
                             df3["titulo"].apply(extrair_codigo), mob3)
                         sem_obra3 = int(df3["obra_id"].isna().sum())
+
+                        # Separa registros COM e SEM numero_nf
+                        df3_com_nf = df3[df3["numero_nf"].notna() & (df3["numero_nf"].str.strip() != "")].copy()
+                        df3_sem_nf = df3[df3["numero_nf"].isna()  | (df3["numero_nf"].str.strip() == "")].copy()
+
                         cols_bd3 = [
                             "obra_id","codigo_obra_original","titulo","etapa_obra",
                             "data_emissao","nome_pagador","cnpj_pagador","numero_nf",
@@ -509,19 +522,37 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             "observacoes","categoria",
                         ]
                         cols_bd3 = [c for c in cols_bd3 if c in df3.columns]
-                        df3 = df3.drop_duplicates(
-                            subset=["numero_nf", "tipo"], keep="last"
-                        )
-                        pacote3 = df3[cols_bd3].to_dict("records")
-                        pacote3 = fix_ids(pacote3)
-                        pacote3 = limpar_nan_pacote(pacote3)
-                        total3 = enviar_lotes("medicoes", pacote3, "Enviando medições...",
-                                               on_conflict="numero_nf,tipo")
+
+                        total3_nf = total3_sem_nf = 0
+
+                        # Registros COM numero_nf: upsert normal
+                        if not df3_com_nf.empty:
+                            df3_com_nf = df3_com_nf.drop_duplicates(
+                                subset=["numero_nf","tipo"], keep="last")
+                            pacote3_nf = df3_com_nf[cols_bd3].to_dict("records")
+                            pacote3_nf = fix_ids(pacote3_nf)
+                            pacote3_nf = limpar_nan_pacote(pacote3_nf)
+                            total3_nf = enviar_lotes(
+                                "medicoes", pacote3_nf, "Enviando medições com NF...",
+                                on_conflict="numero_nf,tipo")
+
+                        # Registros SEM numero_nf: insert simples (sem upsert)
+                        if not df3_sem_nf.empty:
+                            _cols_sem_nf = [c for c in cols_bd3 if c != "numero_nf"]
+                            pacote3_sem = df3_sem_nf[_cols_sem_nf].to_dict("records")
+                            pacote3_sem = fix_ids(pacote3_sem)
+                            pacote3_sem = limpar_nan_pacote(pacote3_sem)
+                            total3_sem_nf = enviar_lotes(
+                                "medicoes", pacote3_sem, "Enviando medições sem NF...")
+
+                        total3 = total3_nf + total3_sem_nf
                         _inline_cache_clear()
                         st.success(f"🎉 {total3} medições importadas!")
                         st.info(
                             f"✅ {total3 - sem_obra3} com obra  "
                             f"| ⚠️ {sem_obra3} sem obra  "
+                            f"| 📋 {total3_nf} com NF  "
+                            f"| 📌 {total3_sem_nf} sem NF  "
                             f"| 🚫 {n_cancel3} canceladas ignoradas")
 
                     # ══ ROTAS 4 / 5 / 6 — PRODUÇÃO ═══════════════════════════
@@ -709,8 +740,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             df7["data"] = formatar_data(df7["data"])
                         for col7 in ["valor_global","qtd","preco_unitario"]:
                             if col7 in df7.columns:
-                                df7[col7] = pd.to_numeric(df7[col7], errors="coerce")
-                                df7[col7] = df7[col7].where(pd.notnull(df7[col7]), None)
+                                df7[col7] = df7[col7].apply(_limpar_num_imp)
                         # Extrai cod4 do centro_custos
                         if "centro_custos" in df7.columns:
                             df7["cod4"] = df7["centro_custos"].apply(extrair_codigo)
@@ -790,8 +820,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             df_rm["data"] = formatar_data(df_rm["data"])
                         for col_rm in ["valor_global", "qtd", "preco_unitario"]:
                             if col_rm in df_rm.columns:
-                                df_rm[col_rm] = pd.to_numeric(df_rm[col_rm], errors="coerce")
-                                df_rm[col_rm] = df_rm[col_rm].where(pd.notnull(df_rm[col_rm]), None)
+                                df_rm[col_rm] = df_rm[col_rm].apply(_limpar_num_imp)
 
                         cols_bd_rm = ["data","id_lancamento","numero_doc",
                                       "centro_custos","conta_macro","conta_gerencial",
@@ -3137,26 +3166,70 @@ elif pagina_selecionada == "🏭 Produção":
         # ── Bloco C — Situação por obra ────────────────────
         st.markdown("#### 🏗️ Situação por obra")
 
-        fab_obra = (df_fab_f.groupby("obra_id")["volume_teorico"].sum()
+        fab_obra = (df_fab_f[df_fab_f["obra_id"].notna()].groupby("obra_id")["volume_teorico"].sum()
                     if not df_fab_f.empty else pd.Series(dtype=float))
-        tra_obra = (df_tra_f.groupby("obra_id")["volume_real"].sum()
+        tra_obra = (df_tra_f[df_tra_f["obra_id"].notna()].groupby("obra_id")["volume_real"].sum()
                     if not df_tra_f.empty else pd.Series(dtype=float))
-        mon_obra = (df_mon_f.groupby("obra_id")["volume_total"].sum()
+        mon_obra = (df_mon_f[df_mon_f["obra_id"].notna()].groupby("obra_id")["volume_total"].sum()
                     if not df_mon_f.empty else pd.Series(dtype=float))
 
+        # Mapa cod4 → nome para cobrir registros sem obra_id
+        _cod4_nome_map = {}
+        for _o in obras_lista:
+            if _o.get("cod4") and _o.get("nome"):
+                _cod4_nome_map[str(_o["cod4"])] = f"{_o['cod4']} — {_o['nome']}"
+
+        # Agrega por cod4_obra para cobrir obra_id NULL
+        def _vol_por_cod4(df, col):
+            if df.empty: return pd.Series(dtype=float)
+            return (df[df["obra_id"].isna()]
+                    .dropna(subset=["cod4_obra"])
+                    .groupby("cod4_obra")[col].sum())
+
+        fab_cod4 = _vol_por_cod4(df_fab_f, "volume_teorico")
+        tra_cod4 = _vol_por_cod4(df_tra_f, "volume_real")
+        mon_cod4 = _vol_por_cod4(df_mon_f, "volume_total")
+
         todas_ids = sorted(set(
-            list(fab_obra.index) + list(tra_obra.index) + list(mon_obra.index)))
+            [int(x) for x in list(fab_obra.index) + list(tra_obra.index) + list(mon_obra.index)
+             if x is not None]))
+        todas_cod4 = sorted(set(
+            list(fab_cod4.index) + list(tra_cod4.index) + list(mon_cod4.index)))
+
         rows_obra = []
         for oid in todas_ids:
-            fab = fab_obra.get(oid, 0)
-            exp = tra_obra.get(oid, 0)
-            mon = mon_obra.get(oid, 0)
+            fab = float(fab_obra.get(oid, 0))
+            exp = float(tra_obra.get(oid, 0))
+            mon = float(mon_obra.get(oid, 0))
+            gap = max(0.0, fab - exp)
+            if   gap > 500: farol = "🔴"
+            elif gap > 200: farol = "🟡"
+            else:           farol = "🟢"
+            # Tenta resolver nome via obras_map, depois via cod4
+            _nome_oid = obras_map.get(oid)
+            if not _nome_oid:
+                _cod4_do_oid = next(
+                    (str(_o["cod4"]) for _o in obras_lista if _o["id"] == oid), "")
+                _nome_oid = _cod4_nome_map.get(_cod4_do_oid, str(oid))
+            rows_obra.append({
+                "Obra":       _nome_oid,
+                "Fab. m³":    round(fab, 1),
+                "% Expedido": min(round(exp / fab * 100, 1) if fab else 0, 100.0),
+                "% Montado":  min(round(mon / fab * 100, 1) if fab else 0, 100.0),
+                "Pátio m³":   round(gap, 1),
+                "Pátio":      f"{farol} {gap:,.0f} m³".replace(",", "."),
+            })
+
+        for cod4 in todas_cod4:
+            fab = float(fab_cod4.get(cod4, 0))
+            exp = float(tra_cod4.get(cod4, 0))
+            mon = float(mon_cod4.get(cod4, 0))
             gap = max(0.0, fab - exp)
             if   gap > 500: farol = "🔴"
             elif gap > 200: farol = "🟡"
             else:           farol = "🟢"
             rows_obra.append({
-                "Obra":       obras_map.get(oid, f"ID {oid}"),
+                "Obra":       _cod4_nome_map.get(str(cod4), str(cod4)),
                 "Fab. m³":    round(fab, 1),
                 "% Expedido": min(round(exp / fab * 100, 1) if fab else 0, 100.0),
                 "% Montado":  min(round(mon / fab * 100, 1) if fab else 0, 100.0),
@@ -5527,7 +5600,7 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         "📊 Visão Geral",
         "📈 Curva ABC",
         "🔍 Padrão & Anomalias",
-        "🔄 Faturamento Direto",
+        "📋 Lançamentos",
         "📐 Custo por m³",
         "⚖️ Tributos",
     ])
@@ -5965,109 +6038,60 @@ elif pagina_selecionada == "💸 Custos & Despesas":
             st.info("São necessários pelo menos 2 meses de dados para o comparativo.")
 
     # ════════════════════════════════════════════════════════
-    # ABA 4 — Faturamento Direto
+    # ABA 4 — Lançamentos
     # ════════════════════════════════════════════════════════
     with aba4:
-        st.info(
-            "Esta aba analisa exclusivamente o faturamento direto (notas de terceiros cobradas ao "
-            "cliente via medições) e o confronta com os custos de insumos registrados. "
-            "Os dados vêm de fontes distintas: **Medições** (o que foi cobrado ao cliente) "
-            "e **Custos** (o que a empresa pagou)."
+        st.markdown("#### 📋 Lançamentos do período")
+        lc1, lc2, lc3, lc4 = st.columns(4)
+        _busca_for4 = lc1.text_input("Fornecedor", key="cd_lanc_for",
+                                      label_visibility="collapsed",
+                                      placeholder="Buscar fornecedor...")
+        _fil_cc4 = lc2.selectbox("Centro de Custo",
+                      ["Todos"] + sorted(df_fil["centro_custos"].dropna().unique().tolist()),
+                      key="cd_lanc_cc", label_visibility="collapsed")
+        _fil_cm4 = lc3.selectbox("Conta Macro",
+                      ["Todas"] + sorted(df_fil["conta_macro"].dropna().unique().tolist()),
+                      key="cd_lanc_cm", label_visibility="collapsed")
+        _fil_cg4 = lc4.selectbox("Conta Gerencial",
+                      ["Todas"] + sorted(df_fil["conta_gerencial"].dropna().unique().tolist()),
+                      key="cd_lanc_cg", label_visibility="collapsed")
+
+        df_lanc = df_fil.copy()
+        if _busca_for4:
+            df_lanc = df_lanc[
+                df_lanc["cli_fornecedor"].fillna("").str.upper()
+                .str.contains(_busca_for4.upper(), na=False)]
+        if _fil_cc4 != "Todos":
+            df_lanc = df_lanc[df_lanc["centro_custos"] == _fil_cc4]
+        if _fil_cm4 != "Todas":
+            df_lanc = df_lanc[df_lanc["conta_macro"] == _fil_cm4]
+        if _fil_cg4 != "Todas":
+            df_lanc = df_lanc[df_lanc["conta_gerencial"] == _fil_cg4]
+
+        _cols_l = ["data","origem","centro_custos","conta_macro",
+                   "conta_gerencial","cli_fornecedor","produto_servico","valor_global"]
+        _cols_l_ok = [c for c in _cols_l if c in df_lanc.columns]
+        st.dataframe(
+            df_lanc[_cols_l_ok].rename(columns={
+                "data":            "Data",
+                "origem":          "Origem",
+                "centro_custos":   "Centro de Custo",
+                "conta_macro":     "Conta Macro",
+                "conta_gerencial": "Conta Gerencial",
+                "cli_fornecedor":  "Fornecedor",
+                "produto_servico": "Produto/Serviço",
+                "valor_global":    "Valor (R$)",
+            }).sort_values("Data", ascending=False),
+            use_container_width=True, hide_index=True,
+            height=min(600, 36 + 35 * min(len(df_lanc), 100)),
+            column_config={
+                "Valor (R$)": st.column_config.NumberColumn(format="R$ %.0f")
+            }
         )
-        with st.spinner("Carregando medições..."):
-            df_med = carregar_medicoes_faturamento()
-
-        _desc_diretas = ["CIMENTO","AÇO","CORDOALHA","FRETE","GUINDASTE",
-                         "COBERTURA","VIDRO SERIGRAFADO","PERFIL INFERIOR",
-                         "PERFIL SUPERIOR","VIDRO","FORMA","PEÇA DE LIGAÇÃO",
-                         "OUTROS MONTAGEM","MONTAGEM","MONTAGEM LAJES"]
-
-        if not df_med.empty:
-            if _dt_ini:
-                df_med = df_med[df_med["data_emissao"] >= pd.Timestamp(_dt_ini)]
-            if _dt_fim:
-                df_med = df_med[df_med["data_emissao"] <= pd.Timestamp(_dt_fim)]
-            _df_med_dir = df_med[
-                df_med["descricao"].fillna("").str.upper()
-                .apply(lambda d: any(kw in d for kw in _desc_diretas))
-            ]
-        else:
-            _df_med_dir = pd.DataFrame()
-
-        _tot_fat_dir = _df_med_dir["valor"].sum() if not _df_med_dir.empty else 0
-        _tot_ins_fab = df_fil.loc[
-            (df_fil["grupo_custo"] == "Insumos Estruturais") &
-            (df_fil["tipo_centro"] == "Indireto (Fábrica)"), "valor_abs"
-        ].sum()
-        _margem_rep  = _tot_fat_dir - _tot_ins_fab
-        _tot_med_all = df_med["valor"].sum() if not df_med.empty else 0
-        _pct_fat_dir = (_tot_fat_dir / _tot_med_all * 100) if _tot_med_all > 0 else 0
-
-        fc1, fc2, fc3, fc4 = st.columns(4)
-        fc1.metric("Faturamento Direto", fmt_brl(_tot_fat_dir))
-        fc2.metric("Custo Insumos Fábrica", fmt_brl(_tot_ins_fab))
-        fc3.metric("Margem de Repasse", fmt_brl(_margem_rep))
-        fc4.metric("% do Faturamento Total", f"{_pct_fat_dir:.1f}%")
-
-        # Tabela de confronto por tipo
-        st.subheader("Confronto por Tipo de Insumo")
-        _confronto = []
-        for _ins_nome, _desc_kw, _cg_kw in [
-            ("Cimento",    ["CIMENTO"],    "CIMENTO"),
-            ("Aço",        ["AÇO"],        "AÇO PARA ESTRUTURAS"),
-            ("Cordoalha",  ["CORDOALHA"],  "CORDOALHA"),
-            ("Frete",      ["FRETE"],      "FRETE PJ"),
-        ]:
-            _v_fat = _df_med_dir[
-                _df_med_dir["descricao"].fillna("").str.upper()
-                .apply(lambda d: any(kw in d for kw in _desc_kw))
-            ]["valor"].sum() if not _df_med_dir.empty else 0
-            _v_cus = df_fil[
-                df_fil["conta_gerencial"].fillna("").str.upper().str.contains(_cg_kw, na=False)
-            ]["valor_abs"].sum()
-            _dif = _v_fat - _v_cus
-            _marg = (_dif / _v_fat * 100) if _v_fat > 0 else 0
-            _confronto.append({
-                "Insumo": _ins_nome,
-                "Faturado ao Cliente (R$)": _v_fat,
-                "Custo Pago (R$)": _v_cus,
-                "Diferença (R$)": _dif,
-                "Margem (%)": _marg,
-            })
-        st.dataframe(pd.DataFrame(_confronto), use_container_width=True, hide_index=True,
-                     column_config={
-                         "Faturado ao Cliente (R$)": st.column_config.NumberColumn(format="R$ %.0f"),
-                         "Custo Pago (R$)":          st.column_config.NumberColumn(format="R$ %.0f"),
-                         "Diferença (R$)":           st.column_config.NumberColumn(format="R$ %.0f"),
-                         "Margem (%)":               st.column_config.NumberColumn(format="%.1f%%"),
-                     })
-
-        # Gráfico por obra
-        _df_ins_obra = (df_fil[df_fil["grupo_custo"] == "Insumos Estruturais"]
-                        .dropna(subset=["cod4"])
-                        .groupby("cod4")["valor_abs"].sum().reset_index()
-                        .rename(columns={"cod4":"obra","valor_abs":"custo"}))
-        if not _df_ins_obra.empty and not _df_med_dir.empty:
-            st.subheader("Custo vs Faturamento por Obra")
-            _mob_p = mapa_obras()
-            _mob_inv = {v: k for k, v in _mob_p.items()}
-            _df_fat_obra = (_df_med_dir.dropna(subset=["obra_id"])
-                            .groupby("obra_id")["valor"].sum().reset_index())
-            _df_fat_obra["obra"] = _df_fat_obra["obra_id"].apply(
-                lambda x: _mob_inv.get(int(x)) if x is not None else None)
-            _df_fat_obra = _df_fat_obra.dropna(subset=["obra"])
-            _df_cv = _df_ins_obra.merge(_df_fat_obra[["obra","valor"]], on="obra", how="outer").fillna(0)
-            _df_cv = _df_cv.rename(columns={"valor":"faturado"}).sort_values("custo", ascending=False)
-
-            fig_cv = go.Figure()
-            fig_cv.add_trace(go.Bar(x=_df_cv["obra"], y=_df_cv["faturado"],
-                                    name="Faturado", marker_color="#43A047"))
-            fig_cv.add_trace(go.Bar(x=_df_cv["obra"], y=_df_cv["custo"],
-                                    name="Custo", marker_color="#E53935"))
-            fig_cv.update_layout(barmode="group", height=320,
-                                  xaxis_title="Obra (cod4)", yaxis_title="R$",
-                                  margin=dict(t=20, b=40))
-            st.plotly_chart(fig_cv, use_container_width=True)
+        st.caption(
+            f"**{len(df_lanc)}** lançamentos · "
+            f"Total: {fmt_brl(df_lanc['valor_abs'].sum() if 'valor_abs' in df_lanc.columns else 0)}"
+        )
 
     # ════════════════════════════════════════════════════════
     # ABA 5 — Custo por m³
