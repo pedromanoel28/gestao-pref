@@ -164,18 +164,29 @@ def limpar_nan_pacote(pacote):
         })
     return limpo
 
-def enviar_lotes(tabela, pacote, barra_label="Enviando...", on_conflict=None):
+def enviar_lotes(tabela, pacote, barra_label="Enviando...", on_conflict=None,
+                 truncate_before=False):
     """Envia em lotes de 500 com barra de progresso.
-    Se on_conflict for fornecido, usa upsert; caso contrário insert."""
+    truncate_before=True → DELETE todos antes de inserir (reimportação limpa).
+    on_conflict → upsert; sem on_conflict → insert."""
+    if truncate_before:
+        supabase.table(tabela).delete().neq("id", -1).execute()
     total = len(pacote)
+    if total == 0:
+        return 0
     barra = st.progress(0, text=barra_label)
     enviado = 0
     for i in range(0, total, 500):
         lote = pacote[i:i+500]
-        if on_conflict:
-            supabase.table(tabela).upsert(lote, on_conflict=on_conflict).execute()
-        else:
-            supabase.table(tabela).insert(lote).execute()
+        try:
+            if on_conflict:
+                supabase.table(tabela).upsert(lote, on_conflict=on_conflict).execute()
+            else:
+                supabase.table(tabela).insert(lote).execute()
+        except Exception as _batch_err:
+            raise RuntimeError(
+                f"Falha no lote {i//500 + 1} (registros {i}–{i+len(lote)-1}): {_batch_err}"
+            ) from _batch_err
         enviado += len(lote)
         barra.progress(min(enviado/total, 1.0), text=f"{enviado}/{total} registros")
     return enviado
@@ -775,19 +786,13 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                                     "chave_coligada","cod_tipo_doc","cod4"]
                         cols_bd7_ok = [c for c in cols_bd7 if c in df7.columns]
                         pacote7_raw = df7[cols_bd7_ok].to_dict("records")
-                        pacote7 = []
-                        for row7 in pacote7_raw:
-                            pacote7.append({
-                                k: None if (
-                                    v is None
-                                    or (isinstance(v, float)
-                                        and (_math.isnan(v) or _math.isinf(v)))
-                                    or str(v).strip().lower()
-                                    in ("nan","nat","none","inf","")
-                                ) else v
-                                for k, v in row7.items()
-                            })
-                        total7 = enviar_lotes("custos", pacote7, "Enviando custos...")
+                        pacote7 = limpar_nan_pacote(pacote7_raw)
+                        _sub7 = st.checkbox(
+                            "🗑️ Substituir tudo (apaga registros existentes antes de inserir)",
+                            key="imp_sub7",
+                            help="Use ao reimportar para evitar duplicatas.")
+                        total7 = enviar_lotes("custos", pacote7, "Enviando custos...",
+                                              truncate_before=_sub7)
                         _inline_cache_clear()
                         st.success(f"🎉 {total7} lançamentos importados!")
                         st.info(f"✅ {com_obra7} diretos (com obra) | 🏭 {sem_obra7} indiretos")
@@ -5517,23 +5522,16 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         st.rerun()
 
     # ── Carga dos dados ──────────────────────────────────────
-    _col_reload, _col_src = st.columns([1, 6])
-    if _col_reload.button("🔄 Recarregar", key="cd_reload", help="Limpa cache e recarrega do banco"):
-        carregar_custos_dashboard.clear()
-        carregar_despesas_dashboard.clear()
-        carregar_receitas_dashboard.clear()
-        st.rerun()
-
     with st.spinner("Carregando dados..."):
         df_cus = carregar_custos_dashboard()
         df_des = carregar_despesas_dashboard()
         df_rec = carregar_receitas_dashboard()
 
-    _col_src.caption(
+    st.caption(
         f"📦 Fonte: **{len(df_cus)}** registros de Custos · "
         f"**{len(df_des)}** de Despesas · "
         f"**{len(df_rec)}** de Receitas"
-        + (" — ⚠️ Tabela Custos vazia, use o Importador (Rota 7)" if df_cus.empty else "")
+        + (" ⚠️ — Tabela Custos vazia! Vá ao Importador → Rota 7." if df_cus.empty else "")
     )
 
     if df_cus.empty and df_des.empty:
