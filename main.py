@@ -5406,7 +5406,7 @@ elif pagina_selecionada == "💸 Custos & Despesas":
                     " valor_global, qtd, preco_unitario, origem, chave_coligada, cod_tipo_doc")
 
     # ── Funções de carga ─────────────────────────────────────
-    @st.cache_data(ttl=600)
+    @st.cache_data(ttl=120)
     def carregar_custos_dashboard():
         rows, page, size = [], 0, 5000
         while True:
@@ -5422,7 +5422,7 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         df = df.dropna(subset=["data"])
         return _enriquecer_df(df)
 
-    @st.cache_data(ttl=600)
+    @st.cache_data(ttl=120)
     def carregar_despesas_dashboard():
         rows, page, size = [], 0, 5000
         while True:
@@ -5517,10 +5517,24 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         st.rerun()
 
     # ── Carga dos dados ──────────────────────────────────────
+    _col_reload, _col_src = st.columns([1, 6])
+    if _col_reload.button("🔄 Recarregar", key="cd_reload", help="Limpa cache e recarrega do banco"):
+        carregar_custos_dashboard.clear()
+        carregar_despesas_dashboard.clear()
+        carregar_receitas_dashboard.clear()
+        st.rerun()
+
     with st.spinner("Carregando dados..."):
         df_cus = carregar_custos_dashboard()
         df_des = carregar_despesas_dashboard()
         df_rec = carregar_receitas_dashboard()
+
+    _col_src.caption(
+        f"📦 Fonte: **{len(df_cus)}** registros de Custos · "
+        f"**{len(df_des)}** de Despesas · "
+        f"**{len(df_rec)}** de Receitas"
+        + (" — ⚠️ Tabela Custos vazia, use o Importador (Rota 7)" if df_cus.empty else "")
+    )
 
     if df_cus.empty and df_des.empty:
         st.warning("Nenhum dado encontrado nas tabelas custos/despesas.")
