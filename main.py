@@ -191,11 +191,35 @@ if pagina_selecionada == "📥 Importador de Arquivos":
 
     # ── helpers locais ────────────────────────────────────────────────────────
     def _limpar_num_imp(val):
+        """Converte string numérica para float.
+        Detecta automaticamente formato BR (vírgula decimal) e US (ponto decimal).
+        Exemplos: 'R$ 1.234,56' → 1234.56 | '1234.56' → 1234.56 | '1.234.567,89' → 1234567.89
+        """
         if val is None or str(val).strip().lower() in ("", "nan", "nat", "none", "inf"):
             return None
+        s = str(val).strip().replace("R$", "").replace(" ", "").strip()
+        if not s:
+            return None
         try:
-            v = float(str(val).replace("R$","").replace(" ","")
-                      .replace(".","").replace(",",".").strip())
+            last_dot   = s.rfind(".")
+            last_comma = s.rfind(",")
+            if last_dot >= 0 and last_comma >= 0:
+                # Ambos presentes: o último é o separador decimal
+                if last_comma > last_dot:
+                    # Formato BR: 1.234,56 → remove pontos, troca vírgula
+                    s = s.replace(".", "").replace(",", ".")
+                else:
+                    # Formato US: 1,234.56 → remove vírgulas
+                    s = s.replace(",", "")
+            elif last_comma >= 0:
+                # Só vírgula: trata como decimal se ≤ 3 dígitos depois dela
+                digits_after = len(s) - last_comma - 1
+                if digits_after <= 3:
+                    s = s.replace(",", ".")
+                else:
+                    s = s.replace(",", "")
+            # Só ponto (ou nenhum): float() interpreta corretamente
+            v = float(s)
             return None if (_math.isnan(v) or _math.isinf(v)) else v
         except Exception:
             return None
