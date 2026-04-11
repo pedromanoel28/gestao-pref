@@ -5632,10 +5632,11 @@ elif pagina_selecionada == "💸 Custos & Despesas":
     kc5.metric("🎯 Ticket Médio",        fmt_brl(_ticket))
 
     # ── Abas ─────────────────────────────────────────────────
-    aba1, aba2, aba3, aba4, aba5, aba6 = st.tabs([
+    aba1, aba2, aba3, aba4, aba5, aba6, aba7 = st.tabs([
         "📊 Visão Geral",
         "📈 Curva ABC",
         "🔍 Padrão & Anomalias",
+        "🔄 Faturamento Direto",
         "📋 Lançamentos",
         "📐 Custo por m³",
         "⚖️ Tributos",
@@ -6074,9 +6075,175 @@ elif pagina_selecionada == "💸 Custos & Despesas":
             st.info("São necessários pelo menos 2 meses de dados para o comparativo.")
 
     # ════════════════════════════════════════════════════════
-    # ABA 4 — Lançamentos
+    # ABA 4 — Faturamento Direto
     # ════════════════════════════════════════════════════════
     with aba4:
+        st.info(
+            "Esta aba analisa exclusivamente o **faturamento direto** — medições emitidas "
+            "por obra — confrontado com os **custos de insumos da fábrica** (Cimento, Aço, "
+            "Cordoalha, Frete). O objetivo é calcular a **margem de repasse** dos insumos "
+            "e identificar obras em que o custo supera o faturado."
+        )
+
+        with st.spinner("Carregando medições..."):
+            df_med_fat = carregar_medicoes_faturamento()
+
+        # Aplicar filtro de período
+        if not df_med_fat.empty:
+            if _dt_ini:
+                df_med_fat = df_med_fat[
+                    df_med_fat["data_emissao"] >= pd.Timestamp(_dt_ini)]
+            if _dt_fim:
+                df_med_fat = df_med_fat[
+                    df_med_fat["data_emissao"] <= pd.Timestamp(_dt_fim)]
+
+        # ── Insumos fábrica (custos diretos de produção) ─────
+        _palavras_fab = ["CIMENTO","AÇO","ACO","CORDOALHA","FRETE","TRANSPORTE"]
+        _mask_ins = df_fil["conta_gerencial"].fillna("").str.upper().apply(
+            lambda x: any(p in x for p in _palavras_fab)
+        )
+        df_ins = df_fil[_mask_ins].copy()
+
+        # ── KPIs ─────────────────────────────────────────────
+        _fat_total  = df_med_fat["valor"].sum() if not df_med_fat.empty else 0
+        _cus_ins    = df_ins["valor_abs"].sum()
+        _margem_rep = _fat_total - _cus_ins
+        _pct_fat    = (_cus_ins / _fat_total * 100) if _fat_total > 0 else 0
+
+        kfd1, kfd2, kfd3, kfd4 = st.columns(4)
+        kfd1.metric("💵 Faturamento Direto",    fmt_brl(_fat_total))
+        kfd2.metric("🏭 Custo Insumos Fábrica", fmt_brl(_cus_ins))
+        kfd3.metric("📈 Margem de Repasse",      fmt_brl(_margem_rep),
+                    delta=f"{_margem_rep:+,.0f}".replace(",", "."))
+        kfd4.metric("⚖️ % do Faturamento Total",
+                    f"{_pct_fat:.1f}%",
+                    help="Parcela do faturamento consumida pelos insumos de fábrica")
+
+        st.divider()
+
+        # ── Confronto por Tipo de Insumo ─────────────────────
+        st.markdown("#### 🧱 Confronto por Tipo de Insumo")
+
+        _MAP_INSUMO = {
+            "CIMENTO":     "Cimento",
+            "AÇO":         "Aço",
+            "ACO":         "Aço",
+            "CORDOALHA":   "Cordoalha",
+            "FRETE":       "Frete",
+            "TRANSPORTE":  "Frete",
+        }
+
+        def _detectar_insumo(conta):
+            cu = str(conta).upper().strip()
+            for k, v in _MAP_INSUMO.items():
+                if k in cu:
+                    return v
+            return "Outros"
+
+        df_ins["tipo_insumo"] = df_ins["conta_gerencial"].apply(_detectar_insumo)
+
+        _tbl_ins = (
+            df_ins.groupby("tipo_insumo", as_index=False)["valor_abs"]
+            .sum()
+            .rename(columns={"tipo_insumo": "Insumo", "valor_abs": "Custo (R$)"})
+            .sort_values("Custo (R$)", ascending=False)
+        )
+        _tbl_ins["% do Total"] = (
+            _tbl_ins["Custo (R$)"] / _tbl_ins["Custo (R$)"].sum() * 100
+        ).round(1)
+
+        st.dataframe(
+            _tbl_ins,
+            use_container_width=True, hide_index=True,
+            column_config={
+                "Custo (R$)":  st.column_config.NumberColumn(format="R$ %.0f"),
+                "% do Total":  st.column_config.NumberColumn(format="%.1f%%"),
+            }
+        )
+
+        st.divider()
+
+        # ── Custo vs Faturamento por Obra ────────────────────
+        st.markdown("#### 🏗️ Custo de Insumos vs Faturamento por Obra")
+
+        if df_med_fat.empty:
+            st.info("Sem dados de medições para o período selecionado.")
+        else:
+            # Faturamento por obra_id
+            _fat_obra = (
+                df_med_fat.groupby("obra_id", as_index=False)["valor"]
+                .sum()
+                .rename(columns={"valor": "Faturamento"})
+            )
+
+            # Custo insumos: usa cod4 como proxy de obra_id
+            _cus_obra = (
+                df_ins.groupby("cod4", as_index=False)["valor_abs"]
+                .sum()
+                .rename(columns={"cod4": "obra_cod4", "valor_abs": "Custo Insumos"})
+            )
+
+            # Lookup obras para nome
+            _obras_raw = carregar_obras_ativas()
+            _obras_lkp = {str(o.get("id", "")): o.get("nome", str(o.get("id", "")))
+                          for o in _obras_raw} if _obras_raw else {}
+
+            _fat_obra["Obra"] = _fat_obra["obra_id"].astype(str).map(
+                lambda x: _obras_lkp.get(x, f"Obra {x}")
+            )
+
+            _df_bar = _fat_obra[["Obra", "Faturamento"]].copy()
+
+            # Tenta cruzar custo por cod4 (best-effort)
+            _fat_obra["cod4_str"] = _fat_obra["obra_id"].astype(str).apply(
+                lambda x: x.zfill(4) if x.isdigit() else x
+            )
+            _cus_obra["obra_cod4"] = _cus_obra["obra_cod4"].astype(str)
+            _merge = _fat_obra.merge(
+                _cus_obra, left_on="cod4_str", right_on="obra_cod4", how="left"
+            )
+            _merge["Custo Insumos"] = _merge["Custo Insumos"].fillna(0)
+
+            _df_bar = _merge[["Obra", "Faturamento", "Custo Insumos"]].copy()
+            _df_bar = _df_bar[_df_bar["Faturamento"] > 0].sort_values(
+                "Faturamento", ascending=False
+            ).head(20)
+
+            if _df_bar.empty:
+                st.info("Nenhuma obra com faturamento no período.")
+            else:
+                _fig_bar = go.Figure()
+                _fig_bar.add_trace(go.Bar(
+                    name="Faturamento",
+                    x=_df_bar["Obra"],
+                    y=_df_bar["Faturamento"],
+                    marker_color="#1976D2",
+                ))
+                _fig_bar.add_trace(go.Bar(
+                    name="Custo Insumos",
+                    x=_df_bar["Obra"],
+                    y=_df_bar["Custo Insumos"],
+                    marker_color="#E53935",
+                ))
+                _fig_bar.update_layout(
+                    barmode="group",
+                    height=420,
+                    margin=dict(t=20, b=100),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    xaxis_tickangle=-35,
+                    yaxis_tickformat=",.0f",
+                )
+                st.plotly_chart(_fig_bar, use_container_width=True)
+
+                st.caption(
+                    f"Mostrando top {len(_df_bar)} obras por faturamento · "
+                    f"Custo insumos cruzado por código de obra (cod4)"
+                )
+
+    # ════════════════════════════════════════════════════════
+    # ABA 5 — Lançamentos
+    # ════════════════════════════════════════════════════════
+    with aba5:
         st.markdown("#### 📋 Lançamentos do período")
         lc1, lc2, lc3, lc4 = st.columns(4)
         _busca_for4 = lc1.text_input("Fornecedor", key="cd_lanc_for",
@@ -6130,9 +6297,9 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         )
 
     # ════════════════════════════════════════════════════════
-    # ABA 5 — Custo por m³
+    # ABA 6 — Custo por m³
     # ════════════════════════════════════════════════════════
-    with aba5:
+    with aba6:
         with st.spinner("Carregando volume de produção..."):
             vol_mes = carregar_producao_mensal()
 
@@ -6329,9 +6496,9 @@ elif pagina_selecionada == "💸 Custos & Despesas":
             st.plotly_chart(fig_h2, use_container_width=True)
 
     # ════════════════════════════════════════════════════════
-    # ABA 6 — Tributos
+    # ABA 7 — Tributos
     # ════════════════════════════════════════════════════════
-    with aba6:
+    with aba7:
         st.info(
             "Os tributos sobre faturamento (ICMS, PIS, COFINS) não transitam como "
             "lançamentos individuais neste sistema — estão embutidos nas notas fiscais. "
