@@ -1579,8 +1579,9 @@ def carregar_custos_completo():
     _kw_indir = ["PRODUÇÃO","PRODUCAO","LABORATÓRIO","LABORATORIO",
                  "MONTAGEM","MANUTENÇÃO","MANUTENCAO"]
     _cc = df["centro_custos"].fillna("").str.upper()
+    _vinculo = df["vinculo"] if "vinculo" in df.columns else pd.Series("", index=df.index)
     df["tipo_centro"] = np.where(
-        df["vinculo"] == "Com Obra", "Direto (Obra)",
+        _vinculo == "Com Obra", "Direto (Obra)",
         np.where(
             _cc.apply(lambda x: any(k in x for k in _kw_equip)),
             "Equipamento",
@@ -5625,7 +5626,7 @@ elif pagina_selecionada == "💸 Custos & Despesas":
     kc5.metric("🎯 Ticket Médio",        fmt_brl(_ticket))
 
     # ── Abas ─────────────────────────────────────────────────
-    aba1, aba2, aba3, aba4, aba5, aba6, aba7 = st.tabs([
+    aba1, aba2, aba3, aba4, aba5, aba6, aba7, aba8 = st.tabs([
         "📊 Visão Geral",
         "📈 Curva ABC",
         "🔍 Padrão & Anomalias",
@@ -5633,6 +5634,7 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         "📋 Lançamentos",
         "📐 Custo por m³",
         "⚖️ Tributos",
+        "🧪 Conferência",
     ])
 
     # ── Componente drill-through ─────────────────────────────
@@ -6734,3 +6736,34 @@ elif pagina_selecionada == "💸 Custos & Despesas":
                 f"**{len(_df_trib_f)}** lançamentos · "
                 f"Total filtrado: {fmt_brl(_df_trib_f['valor_global'].sum())}"
             )
+
+    with aba8:
+        st.subheader("🧪 Conferência — Dados brutos das views")
+
+        st.markdown("#### Custos & Despesas (`mv_custos_completo`)")
+        _conf_cus = df_all.copy()
+        st.caption(f"{len(_conf_cus)} linhas · colunas: {list(_conf_cus.columns)}")
+        _conf_cols = [c for c in [
+            "data", "mes", "origem", "conta_macro", "conta_gerencial",
+            "centro_custos", "cli_fornecedor", "valor_global", "valor_abs", "grupo_custo", "tipo_centro"
+        ] if c in _conf_cus.columns]
+        st.dataframe(
+            _conf_cus[_conf_cols].sort_values("data", ascending=False).head(200),
+            use_container_width=True, hide_index=True,
+            column_config={
+                "valor_global": st.column_config.NumberColumn(format="R$ %.2f"),
+                "valor_abs":    st.column_config.NumberColumn(format="R$ %.2f"),
+            }
+        )
+
+        st.divider()
+        st.markdown("#### Volume de Fabricação (`mv_fabricacao_mensal`)")
+        _conf_vol = pd.DataFrame(
+            supabase.table("mv_fabricacao_mensal").select("*").execute().data or []
+        )
+        if _conf_vol.empty:
+            st.warning("View mv_fabricacao_mensal vazia ou inexistente.")
+        else:
+            st.caption(f"{len(_conf_vol)} linhas · colunas: {list(_conf_vol.columns)}")
+            st.dataframe(_conf_vol.sort_values("mes", ascending=False) if "mes" in _conf_vol.columns else _conf_vol,
+                         use_container_width=True, hide_index=True)
