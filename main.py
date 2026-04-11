@@ -1563,8 +1563,9 @@ def carregar_custos_completo():
     if df.empty:
         return df
     df["data"]         = pd.to_datetime(df["data"], errors="coerce")
-    df["valor_global"] = pd.to_numeric(df["valor_global"], errors="coerce")
-    df["valor_abs"]    = pd.to_numeric(df["valor_abs"],    errors="coerce").fillna(0)
+    df["valor_global"] = pd.to_numeric(df["valor_global"], errors="coerce").fillna(0)
+    df["valor_abs"]    = df["valor_global"].abs()
+    df = df[df["data"].notna()].copy()
     df["mes"]          = df["data"].dt.to_period("M").astype(str)
     df["ano"]          = df["data"].dt.year.astype(str)
     df["grupo_custo"]  = (
@@ -3663,7 +3664,7 @@ elif pagina_selecionada == "🏭 Produção":
     # ABA 3 — INSUMOS
     # ════════════════════════════════════════════════════════
     with tab3:
-        vol_total_fab = df_fab_f["volume_total"].sum() if not df_fab_f.empty else 0
+        vol_total_fab = df_fab_f["volume_teorico"].sum() if not df_fab_f.empty else 0
 
         # Totais por tipo de aço
         if not df_fab_f.empty:
@@ -3769,13 +3770,13 @@ elif pagina_selecionada == "🏭 Produção":
             def carregar_fabricacao_historico():
                 try:
                     df = fetch_all("producao_fabricacao",
-                                   "obra_id, produto, volume_total, peso_aco,"
+                                   "obra_id, produto, volume_teorico, peso_aco,"
                                    " peso_aco_frouxo, peso_aco_protendido")
                 except Exception:
                     df = fetch_all("producao_fabricacao",
-                                   "obra_id, produto, volume_total, peso_aco")
+                                   "obra_id, produto, volume_teorico, peso_aco")
                 if df.empty: return df
-                for col in ["volume_total", "peso_aco", "peso_aco_frouxo", "peso_aco_protendido"]:
+                for col in ["volume_teorico", "peso_aco", "peso_aco_frouxo", "peso_aco_protendido"]:
                     if col not in df.columns: df[col] = 0.0
                     df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
                 def _tipo(n):
@@ -3793,21 +3794,21 @@ elif pagina_selecionada == "🏭 Produção":
 
             # Média histórica kg/m³ por produto
             if not df_hist.empty:
-                ref_prod = (df_hist[df_hist["volume_total"] > 0]
+                ref_prod = (df_hist[df_hist["volume_teorico"] > 0]
                             .groupby("produto")
-                            .agg(aco_h=("peso_aco", "sum"), vol_h=("volume_total", "sum"))
+                            .agg(aco_h=("peso_aco", "sum"), vol_h=("volume_teorico", "sum"))
                             .reset_index())
                 ref_prod["ref_kgm3"] = ref_prod["aco_h"] / ref_prod["vol_h"]
             else:
                 ref_prod = pd.DataFrame(columns=["produto", "ref_kgm3"])
 
-            bench = (df_fab_f[df_fab_f["volume_total"] > 0]
+            bench = (df_fab_f[df_fab_f["volume_teorico"] > 0]
                      .groupby("produto")
                      .agg(frouxo=("peso_aco_frouxo", "sum"),
                           cv=("cord_viga",           "sum"),
                           cl=("cord_laje",           "sum"),
                           aco=("peso_aco",           "sum"),
-                          vol=("volume_total",       "sum"))
+                          vol=("volume_teorico",     "sum"))
                      .reset_index())
             bench["frouxo_m3"] = bench["frouxo"] / bench["vol"]
             bench["cv_m3"]     = bench["cv"]     / bench["vol"]
@@ -3878,7 +3879,7 @@ elif pagina_selecionada == "🏭 Produção":
             st.markdown("#### 🏗️ Aço por m³ por produto (Top 20)")
             if not df_fab_f.empty:
                 aco_prod = (df_fab_f.groupby("produto")
-                            .agg(aco=("peso_aco", "sum"), vol=("volume_total", "sum"))
+                            .agg(aco=("peso_aco", "sum"), vol=("volume_teorico", "sum"))
                             .reset_index())
                 aco_prod = aco_prod[aco_prod["vol"] > 0].copy()
                 aco_prod["kgm3"] = aco_prod["aco"] / aco_prod["vol"]
@@ -5510,12 +5511,13 @@ elif pagina_selecionada == "💸 Custos & Despesas":
 
     @st.cache_data(ttl=300)
     def carregar_producao_mensal():
-        df = fetch_all("producao_fabricacao", "data_fabricacao, volume_teorico")
+        df = pd.DataFrame(
+            supabase.table("mv_fabricacao_mensal").select("mes, vol_teorico").execute().data or []
+        )
         if df.empty:
             return pd.Series(dtype=float)
-        df["volume_teorico"] = pd.to_numeric(df["volume_teorico"], errors="coerce").fillna(0)
-        df["mes"] = pd.to_datetime(df["data_fabricacao"], errors="coerce").dt.to_period("M").astype(str)
-        return df.groupby("mes")["volume_teorico"].sum()
+        df["vol_teorico"] = pd.to_numeric(df["vol_teorico"], errors="coerce").fillna(0)
+        return df.groupby("mes")["vol_teorico"].sum()
 
     def _limpar_caches_custos():
         limpar_todos_caches()
