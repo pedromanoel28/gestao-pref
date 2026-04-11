@@ -15,8 +15,13 @@ st.set_page_config(page_title="Civil Gestão", page_icon="🏛️", layout="wide
 @st.cache_resource
 def iniciar_conexao():
     import os
-    url   = os.environ.get("SUPABASE_URL", "https://crdskgqkkkzmgedsunat.supabase.co")
-    chave = os.environ.get("SUPABASE_KEY", "sb_publishable_MTT7fwe8IefxrY6MO_gthw_nCo5QfWF")
+    url   = (st.secrets.get("SUPABASE_URL")
+             or os.environ.get("SUPABASE_URL"))
+    chave = (st.secrets.get("SUPABASE_KEY")
+             or os.environ.get("SUPABASE_KEY"))
+    if not url or not chave:
+        st.error("⚠️ Credenciais do Supabase não configuradas.")
+        st.stop()
     return create_client(url, chave)
 
 supabase = iniciar_conexao()
@@ -241,30 +246,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
         return str(val).strip()
 
     def _inline_cache_clear():
-        try: mapa_obras.clear()
-        except: pass
-        try: mapa_equipe.clear()
-        except: pass
-        try: carregar_obras_ativas.clear()
-        except: pass
-        try: carregar_obras_completo.clear()
-        except: pass
-        try: carregar_medicoes_resumo.clear()
-        except: pass
-        try: carregar_producao_resumo.clear()
-        except: pass
-        try: carregar_transporte_resumo.clear()
-        except: pass
-        try: carregar_montagem_resumo.clear()
-        except: pass
-        try: carregar_custos_resumo.clear()
-        except: pass
-        try: carregar_custos_dashboard.clear()
-        except: pass
-        try: carregar_despesas_dashboard.clear()
-        except: pass
-        try: carregar_equipe_ativa.clear()
-        except: pass
+        limpar_todos_caches()
 
     # ── seleção de rota ───────────────────────────────────────────────────────
     opcao = st.selectbox("Qual arquivo está importando?", [
@@ -493,7 +475,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                                     payload2[campo] = _limpar_str_imp(row2.get(campo))
                             for campo in _cols_num2:
                                 if campo in df2.columns:
-                                    payload2[campo] = _limpar_num_imp(row2.get(campo))
+                                    payload2[campo] = parse_brl(row2.get(campo))
                             payload2 = {k: v for k, v in payload2.items() if k in cols_bd2}
                             r_fin2 = (supabase.table("obras_financeiro").select("cod4")
                                       .eq("cod4", cod4).execute())
@@ -537,7 +519,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         df3["data_vencimento"] = formatar_data(df3["data_vencimento"])
 
                         # Converte valor — suporta "R$ 189.916,51" e "189916.51"
-                        df3["valor"] = df3["valor"].apply(lambda v: _limpar_num_imp(v))
+                        df3["valor"] = df3["valor"].apply(parse_brl)
 
                         # Vincula obra
                         mob3 = mapa_obras()
@@ -667,7 +649,7 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         df_p[date_p] = formatar_data(df_p[date_p])
                         for c_p in num_p:
                             if c_p in df_p.columns:
-                                df_p[c_p] = formatar_numero(df_p[c_p])
+                                df_p[c_p] = df_p[c_p].apply(parse_brl)
                         df_p = nulos(df_p)
                         # Manter só colunas que existem
                         cols_bd_p_ok = [c for c in cols_bd_p if c in df_p.columns]
@@ -775,7 +757,10 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             df7["data"] = formatar_data(df7["data"])
                         for col7 in ["valor_global","qtd","preco_unitario"]:
                             if col7 in df7.columns:
-                                df7[col7] = df7[col7].apply(_limpar_num_imp)
+                                df7[col7] = df7[col7].apply(parse_brl)
+                        # Remove linha de rodapé nula (totalizador do arquivo ERP)
+                        df7 = df7.dropna(subset=["data"]).copy()
+                        df7 = df7[df7["valor_global"].notna()].copy()
                         # Extrai cod4 do centro_custos
                         if "centro_custos" in df7.columns:
                             df7["cod4"] = df7["centro_custos"].apply(extrair_codigo)
@@ -787,6 +772,19 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         cols_bd7_ok = [c for c in cols_bd7 if c in df7.columns]
                         pacote7_raw = df7[cols_bd7_ok].to_dict("records")
                         pacote7 = limpar_nan_pacote(pacote7_raw)
+                        # Deduplica pela combinação que identifica um lançamento único
+                        _seen7 = {}
+                        for _r7 in pacote7:
+                            _k7 = (
+                                str(_r7.get("data") or ""),
+                                str(_r7.get("centro_custos") or ""),
+                                str(_r7.get("conta_gerencial") or ""),
+                                str(_r7.get("cli_fornecedor") or ""),
+                                str(_r7.get("valor_global") or ""),
+                            )
+                            _seen7[_k7] = _r7
+                        _n_dedup7 = len(pacote7) - len(_seen7)
+                        pacote7 = list(_seen7.values())
                         _sub7 = st.checkbox(
                             "🗑️ Substituir tudo (apaga registros existentes antes de inserir)",
                             key="imp_sub7",
@@ -794,8 +792,14 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         total7 = enviar_lotes("custos", pacote7, "Enviando custos...",
                                               truncate_before=_sub7)
                         _inline_cache_clear()
+                        try:
+                            supabase.rpc("refresh_all").execute()
+                        except Exception:
+                            pass
                         st.success(f"🎉 {total7} lançamentos importados!")
                         st.info(f"✅ {com_obra7} diretos (com obra) | 🏭 {sem_obra7} indiretos")
+                        if _n_dedup7 > 0:
+                            st.warning(f"⚠️ {_n_dedup7} lançamentos duplicados removidos antes de importar")
 
                     # ══ ROTAS 9 / 10 — RECEITAS / DESPESAS (RM) ══════════════
                     elif rota in ("9", "10"):
@@ -849,7 +853,10 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                             df_rm["data"] = formatar_data(df_rm["data"])
                         for col_rm in ["valor_global", "qtd", "preco_unitario"]:
                             if col_rm in df_rm.columns:
-                                df_rm[col_rm] = df_rm[col_rm].apply(_limpar_num_imp)
+                                df_rm[col_rm] = df_rm[col_rm].apply(parse_brl)
+                        # Remove linha de rodapé nula (totalizador do arquivo ERP)
+                        df_rm = df_rm.dropna(subset=["data"]).copy()
+                        df_rm = df_rm[df_rm["valor_global"].notna()].copy()
 
                         cols_bd_rm = ["data","id_lancamento","numero_doc",
                                       "centro_custos","conta_macro","conta_gerencial",
@@ -859,11 +866,30 @@ if pagina_selecionada == "📥 Importador de Arquivos":
                         cols_bd_rm_ok = [c for c in cols_bd_rm if c in df_rm.columns]
                         pacote_rm_raw = df_rm[cols_bd_rm_ok].to_dict("records")
                         pacote_rm = limpar_nan_pacote(pacote_rm_raw)
+                        # Deduplica pela combinação que identifica um lançamento único
+                        _seen_rm = {}
+                        for _r_rm in pacote_rm:
+                            _k_rm = (
+                                str(_r_rm.get("data") or ""),
+                                str(_r_rm.get("centro_custos") or ""),
+                                str(_r_rm.get("conta_gerencial") or ""),
+                                str(_r_rm.get("cli_fornecedor") or ""),
+                                str(_r_rm.get("valor_global") or ""),
+                            )
+                            _seen_rm[_k_rm] = _r_rm
+                        _n_dedup_rm = len(pacote_rm) - len(_seen_rm)
+                        pacote_rm = list(_seen_rm.values())
 
                         total_rm = enviar_lotes(tabela_rm, pacote_rm, f"Enviando {label_rm}...")
                         _inline_cache_clear()
+                        try:
+                            supabase.rpc("refresh_all").execute()
+                        except Exception:
+                            pass
                         st.success(f"🎉 {total_rm} lançamentos de {label_rm} importados!")
                         st.info(f"✅ {com_obra_rm} com cod4 (vinculados) | 🏭 {sem_obra_rm} sem cod4")
+                        if _n_dedup_rm > 0:
+                            st.warning(f"⚠️ {_n_dedup_rm} lançamentos duplicados removidos antes de importar")
 
                     # ══ ROTA 8 — FOLHA / RH ═══════════════════════════════════
                     elif rota == "8":
@@ -1143,50 +1169,17 @@ def carregar_tarefas_colab(colab_id):
         .execute()
     return resp.data
 
+def limpar_todos_caches():
+    """Invalida TODOS os caches de uma vez.
+    Usar após qualquer importação ou alteração de dados."""
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+
 def limpar_cache():
-    carregar_obras_ativas.clear()
-    carregar_equipe_ativa.clear()
-    carregar_template.clear()
-    carregar_tarefas.clear()
-    carregar_alertas.clear()
-    carregar_ultimo_update.clear()
-    carregar_tarefas_colab.clear()
-    mapa_obras.clear()
-    mapa_equipe.clear()
-    try: carregar_obras_completo.clear()
-    except: pass
-    try: carregar_medicoes_resumo.clear()
-    except: pass
-    try: carregar_producao_resumo.clear()
-    except: pass
-    try: carregar_transporte_resumo.clear()
-    except: pass
-    try: carregar_montagem_resumo.clear()
-    except: pass
-    try: carregar_custos_resumo.clear()
-    except: pass
-    try: carregar_tarefas_extras.clear()
-    except: pass
-    try: _jornada_analise.clear()
-    except: pass
-    try: _marcos_analise.clear()
-    except: pass
-    try: _fab_obra.clear()
-    except: pass
-    try: _exp_obra.clear()
-    except: pass
-    try: _mont_obra.clear()
-    except: pass
-    try: _medicoes_obra.clear()
-    except: pass
-    try: _fin_obra.clear()
-    except: pass
-    try: carregar_folha_meses.clear()
-    except: pass
-    try: carregar_folha_mes.clear()
-    except: pass
-    try: carregar_folha_historico.clear()
-    except: pass
+    """Mantido por compatibilidade — delega para limpar_todos_caches()."""
+    limpar_todos_caches()
 
 # ── PAINEL LATERAL — EDIÇÃO RÁPIDA DE OBRA ──────────────
 _SB_STATUS   = ["Em Andamento", "Concluída", "Cancelada", "Proposta"]
@@ -1304,15 +1297,7 @@ def carregar_obras_completo():
 @st.cache_data(ttl=900)
 def carregar_medicoes_resumo():
     """medicoes sem canceladas/remessas, com campo mes."""
-    rows, page, size = [], 0, 1000
-    q = supabase.table("medicoes")\
-        .select("obra_id, data_emissao, descricao, tipo, valor")
-    while True:
-        resp = q.range(page * size, (page + 1) * size - 1).execute()
-        rows.extend(resp.data)
-        if len(resp.data) < size: break
-        page += 1
-    df = pd.DataFrame(rows)
+    df = fetch_all("medicoes", "obra_id, data_emissao, descricao, tipo, valor")
     if df.empty:
         return df
     excluir = {"NOTA FISCAL CANCELADA", "NOTA FISCAL REMESSA"}
@@ -1322,81 +1307,77 @@ def carregar_medicoes_resumo():
     df["mes"]          = df["data_emissao"].dt.to_period("M").astype(str)
     return df
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=300)
 def carregar_producao_resumo():
-    """producao_fabricacao com dedup por (obra_id, peca) — volume_teorico correto."""
-    cols = ("obra_id, peca, produto, secao, etapa, qtde_pecas,"
-            " volume_teorico, volume_total, peso_aco_frouxo,"
-            " peso_aco_protendido, peso_aco, data_fabricacao")
-    rows, page, size = [], 0, 5000
-    q = supabase.table("producao_fabricacao").select(cols)
-    while True:
-        resp = q.range(page * size, (page + 1) * size - 1).execute()
-        rows.extend(resp.data)
-        if len(resp.data) < size: break
-        page += 1
-    df = pd.DataFrame(rows)
+    """Fabricação agregada por obra/mês — lê da view mv_fabricacao_mensal."""
+    df = pd.DataFrame(
+        supabase.table("mv_fabricacao_mensal").select("*").execute().data or []
+    )
     if df.empty:
         return df
-    for col in ["volume_teorico","volume_total","peso_aco",
-                "peso_aco_frouxo","peso_aco_protendido","qtde_pecas"]:
-        if col not in df.columns:
-            df[col] = 0.0
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    df["data_fabricacao"] = pd.to_datetime(df["data_fabricacao"], errors="coerce")
-    df["mes"] = df["data_fabricacao"].dt.to_period("M").astype(str)
+    for col in ["vol_teorico","vol_total","peso_aco","peso_frouxo","peso_protendido","pecas"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    df["mes"] = pd.to_datetime(df["mes"], errors="coerce").dt.to_period("M").astype(str)
+    df = df.rename(columns={
+        "vol_teorico":    "volume_teorico",
+        "vol_total":      "volume_total",
+        "peso_frouxo":    "peso_aco_frouxo",
+        "peso_protendido":"peso_aco_protendido",
+    })
     return df
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=300)
 def carregar_transporte_resumo():
-    """producao_transporte resumido para dashboards."""
-    rows, page, size = [], 0, 5000
-    q = supabase.table("producao_transporte")\
-        .select("obra_id, produto, volume_real, data_expedicao")
-    while True:
-        resp = q.range(page * size, (page + 1) * size - 1).execute()
-        rows.extend(resp.data)
-        if len(resp.data) < size: break
-        page += 1
-    df = pd.DataFrame(rows)
+    """Transporte agregado por obra/mês — lê da view mv_transporte_mensal."""
+    df = pd.DataFrame(
+        supabase.table("mv_transporte_mensal").select("*").execute().data or []
+    )
     if df.empty:
         return df
-    df["volume_real"]    = pd.to_numeric(df["volume_real"], errors="coerce").fillna(0)
-    df["data_expedicao"] = pd.to_datetime(df["data_expedicao"], errors="coerce")
-    df["mes"]            = df["data_expedicao"].dt.to_period("M").astype(str)
+    for col in ["vol_real","peso_total","expedicoes"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    df["mes"] = pd.to_datetime(df["mes"], errors="coerce").dt.to_period("M").astype(str)
+    df = df.rename(columns={"vol_real": "volume_real"})
     return df
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=300)
 def carregar_montagem_resumo():
-    """producao_montagem resumido para dashboards."""
-    rows, page, size = [], 0, 5000
-    q = supabase.table("producao_montagem")\
-        .select("obra_id, produto, volume_teorico, data_montagem")
-    while True:
-        resp = q.range(page * size, (page + 1) * size - 1).execute()
-        rows.extend(resp.data)
-        if len(resp.data) < size: break
-        page += 1
-    df = pd.DataFrame(rows)
+    """Montagem agregada por obra/mês — lê da view mv_montagem_mensal."""
+    df = pd.DataFrame(
+        supabase.table("mv_montagem_mensal").select("*").execute().data or []
+    )
     if df.empty:
         return df
-    df["volume_teorico"] = pd.to_numeric(df["volume_teorico"], errors="coerce").fillna(0)
-    df["data_montagem"]  = pd.to_datetime(df["data_montagem"], errors="coerce")
-    df["mes"]            = df["data_montagem"].dt.to_period("M").astype(str)
+    for col in ["vol_montado","montagens"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    df["mes"] = pd.to_datetime(df["mes"], errors="coerce").dt.to_period("M").astype(str)
+    df = df.rename(columns={"vol_montado": "volume_teorico"})
     return df
 
-@st.cache_data(ttl=900)
+@st.cache_data(ttl=300)
+def carregar_patio_resumo():
+    """Situação do pátio por obra — lê da view mv_patio_atual."""
+    df = pd.DataFrame(
+        supabase.table("mv_patio_atual").select("*").execute().data or []
+    )
+    if df.empty:
+        return df
+    for col in ["pecas_no_patio","vol_no_patio","prazo_medio_dias"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    return df
+
+@st.cache_data(ttl=300)
 def carregar_custos_resumo():
-    """custos para eficiência — valor_global em abs()."""
-    rows, page, size = [], 0, 1000
-    q = supabase.table("custos")\
-        .select("data, conta_macro, conta_gerencial, centro_custos, cli_fornecedor, valor_global")
-    while True:
-        resp = q.range(page * size, (page + 1) * size - 1).execute()
-        rows.extend(resp.data)
-        if len(resp.data) < size: break
-        page += 1
-    df = pd.DataFrame(rows)
+    """Custos + despesas para eficiência — lê da view mv_custos_completo."""
+    df = pd.DataFrame(
+        supabase.table("mv_custos_completo").select(
+            "data, conta_macro, conta_gerencial, centro_custos, cli_fornecedor, valor_global, valor_abs"
+        ).execute().data or []
+    )
     if df.empty:
         return df
     df["data"]         = pd.to_datetime(df["data"], errors="coerce")
@@ -1461,6 +1442,155 @@ def fmt_brl(valor):
     sinal = "-" if v < 0 else ""
     return (f"{sinal}R$ "
             + f"{abs(v):,.0f}".replace(",", "X").replace(".", ",").replace("X", "."))
+
+def fetch_all(tabela, colunas="*", page_size=5000, **filtros_eq):
+    """Carrega todos os registros com paginação automática.
+    filtros_eq: pares coluna=valor para filtros de igualdade simples.
+    Exemplo: fetch_all('custos', 'data,valor_global', obra_id=42)
+    """
+    rows, page = [], 0
+    q = supabase.table(tabela).select(colunas)
+    for col, val in filtros_eq.items():
+        q = q.eq(col, val)
+    while True:
+        batch = q.range(page * page_size, (page + 1) * page_size - 1).execute().data
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        page += 1
+    return pd.DataFrame(rows)
+
+def parse_brl(valor):
+    """Converte qualquer representação de número para float.
+    Suporta: 'R$ 1.234,56', '1234.56', '-1.234', '1,234.56'
+    Retorna None para vazios, NaN, infinitos.
+    """
+    import math as _m, re as _re
+    if valor is None:
+        return None
+    s = _re.sub(r"[^\d,.\-]", "", str(valor).strip())
+    if not s or s in ("-", "."):
+        return None
+    last_dot   = s.rfind(".")
+    last_comma = s.rfind(",")
+    if last_dot > 0 and last_comma > 0:
+        if last_comma > last_dot:          # 1.234,56 → brasileiro
+            s = s.replace(".", "").replace(",", ".")
+        else:                              # 1,234.56 → americano
+            s = s.replace(",", "")
+    elif last_comma > 0:                   # só vírgula → 1234,56
+        s = s.replace(",", ".")
+    try:
+        v = float(s)
+        if _m.isnan(v) or _m.isinf(v) or abs(v) >= 1e13:
+            return None
+        return v
+    except Exception:
+        return None
+
+# ── Mapeamento global conta_gerencial → grupo_custo ────────
+# Usado por carregar_custos_completo e _enriquecer_df (Custos page)
+_MAP_GRUPO_GLOBAL = {
+    "CIMENTO":                              "Insumos Estruturais",
+    "AÇO PARA ESTRUTURAS":                  "Insumos Estruturais",
+    "CORDOALHA":                            "Insumos Estruturais",
+    "AREIA NATURAL":                        "Insumos Estruturais",
+    "PEDRAS BRITADAS":                      "Insumos Estruturais",
+    "ADITIVO":                              "Insumos Estruturais",
+    "METACAULIM":                           "Insumos Estruturais",
+    "MINÉRIO NÃO REAGIDO":                  "Insumos Estruturais",
+    "MATERIAIS DE CONSUMO":                 "Materiais de Consumo",
+    "PEÇAS E ACESSÓRIOS":                   "Peças e Manutenção",
+    "FERRAMENTAS E UTENSÍLIOS":             "Peças e Manutenção",
+    "PEÇAS DE DESGASTE":                    "Peças e Manutenção",
+    "GASES E ELETRODOS":                    "Peças e Manutenção",
+    "LUBRIFICANTES":                        "Peças e Manutenção",
+    "PNEUS E CÂMARAS":                      "Peças e Manutenção",
+    "SERVIÇOS DE MANUTENÇÃO DE EQUIP. PJ":  "Peças e Manutenção",
+    "SALARIOS":                             "Pessoal",
+    "INSS S/ FOLHA":                        "Pessoal",
+    "INSS FOLHA":                           "Pessoal",
+    "FGTS":                                 "Pessoal",
+    "HORAS EXTRAS":                         "Pessoal",
+    "FERIAS":                               "Pessoal",
+    "DECIMO TERCEIRO  SALARIO":             "Pessoal",
+    "ADICIONAL NOTURNO":                    "Pessoal",
+    "ADICIONAL DE PERICULOSIDADE":          "Pessoal",
+    "13 SALARIO INDENIZADO":                "Pessoal",
+    "FERIAS INDENIZADAS":                   "Pessoal",
+    "AVISO PREVIO INDENIZADO":              "Pessoal",
+    "FGTS RESCISÃO":                        "Pessoal",
+    "PRODUTIVIDADE":                        "Pessoal",
+    "1/3 FERIAS":                           "Pessoal",
+    "ABONO PECUNIARIO DE FERIAS":           "Pessoal",
+    "1/3 ABONO PECUNIARIO DE FERIAS":       "Pessoal",
+    "ANUENIO":                              "Pessoal",
+    "MULTA ART 480":                        "Pessoal",
+    "ALIMENTAÇÃO":                          "Benefícios",
+    "ALIMENTACAO":                          "Benefícios",
+    "ASSISTÊNCIA MÉDICA":                   "Benefícios",
+    "ASSISTENCIA MEDICA/ODONTOLOGICA":      "Benefícios",
+    "SEGURO DE VIDA":                       "Benefícios",
+    "VALE-TRANSPORTE":                      "Benefícios",
+    "TRANSPORTE DE FUNCIONARIOS":           "Benefícios",
+    "CESTAS BASICAS":                       "Benefícios",
+    "EXAMES OCUPACIONAIS":                  "Benefícios",
+    "FARDAMENTO E EQUIPAMENTO DE SEGURANÇA": "Benefícios",
+    "ESTAGIARIOS":                          "Benefícios",
+    "OUTROS SERVIÇOS PJ":                   "Serviços PJ",
+    "SERVIÇOS PJ PARA PRODUÇÃO":            "Serviços PJ",
+    "LOCAÇÕES PJ":                          "Serviços PJ",
+    "SERVIÇOS TÉCNICOS":                    "Serviços PJ",
+    "SERVIÇOS DE CONSULTORIAS PJ":          "Serviços PJ",
+    "SERVIÇOS DE DESENV./SUPORTE DE SISTEMAS": "Serviços PJ",
+    "SERVIÇOS DE CONSERVAÇÃO E LIMPEZA PJ": "Serviços PJ",
+    "FRETE PJ":                             "Logística",
+    "FRETE PJ PARA CLIENTES":              "Logística",
+    "COMBUSTÍVEIS":                         "Logística",
+    "PEDÁGIOS/ESTACIONAMENTOS/CONDUÇÕES":   "Logística",
+    "ENERGIA ELÉTRICA":                     "Energia e Infraestrutura",
+    "DEPRECIAÇÕES":                         "Energia e Infraestrutura",
+    "DEPRECIACOES":                         "Energia e Infraestrutura",
+    "MATERIAIS APLICADOS EM REFORMAS":      "Energia e Infraestrutura",
+}
+
+@st.cache_data(ttl=300)
+def carregar_custos_completo():
+    """Custos + despesas unificados — lê da view mv_custos_completo."""
+    df = pd.DataFrame(
+        supabase.table("mv_custos_completo").select("*").execute().data or []
+    )
+    if df.empty:
+        return df
+    df["data"]         = pd.to_datetime(df["data"], errors="coerce")
+    df["valor_global"] = pd.to_numeric(df["valor_global"], errors="coerce")
+    df["valor_abs"]    = pd.to_numeric(df["valor_abs"],    errors="coerce").fillna(0)
+    df["mes"]          = df["data"].dt.to_period("M").astype(str)
+    df["ano"]          = df["data"].dt.year.astype(str)
+    df["grupo_custo"]  = (
+        df["conta_gerencial"]
+        .fillna("").str.upper().str.strip()
+        .map(_MAP_GRUPO_GLOBAL)
+        .fillna("Outros")
+    )
+    _kw_equip = ["CAMINHÃO","CAMINHAO","PÓRTICO","PORTICO",
+                 "RETROESCAVADEIRA","BETONEIRA","MUNCK","MAQUINA","MÁQUINA"]
+    _kw_indir = ["PRODUÇÃO","PRODUCAO","LABORATÓRIO","LABORATORIO",
+                 "MONTAGEM","MANUTENÇÃO","MANUTENCAO"]
+    _cc = df["centro_custos"].fillna("").str.upper()
+    df["tipo_centro"] = np.where(
+        df["vinculo"] == "Com Obra", "Direto (Obra)",
+        np.where(
+            _cc.apply(lambda x: any(k in x for k in _kw_equip)),
+            "Equipamento",
+            np.where(
+                _cc.apply(lambda x: any(k in x for k in _kw_indir)),
+                "Indireto (Fábrica)",
+                "Outros"
+            )
+        )
+    )
+    return df
 
 # ==========================================================
 # PÁGINA: GESTÃO DE OBRAS (SÚMULA)
@@ -2339,14 +2469,7 @@ elif pagina_selecionada == "💰 Financeiro":
     def carregar_medicoes():
         # Filtragem de tipo feita em Python — not_.in_ combinado com range()
         # causa APIError em certas versões do supabase-py
-        rows, page, size = [], 0, 1000
-        q = supabase.table("medicoes").select("obra_id, data_emissao, descricao, tipo, valor")
-        while True:
-            resp = q.range(page * size, (page + 1) * size - 1).execute()
-            rows.extend(resp.data)
-            if len(resp.data) < size: break
-            page += 1
-        df = pd.DataFrame(rows)
+        df = fetch_all("medicoes", "obra_id, data_emissao, descricao, tipo, valor")
         if df.empty: return df
         excluir = {"NOTA FISCAL CANCELADA", "NOTA FISCAL REMESSA"}
         df = df[~df["tipo"].str.strip().str.upper().isin(excluir)].copy()
@@ -2357,14 +2480,7 @@ elif pagina_selecionada == "💰 Financeiro":
 
     @st.cache_data(ttl=600)
     def carregar_medicoes_completas(obra_id):
-        rows, page, size = [], 0, 1000
-        q = supabase.table("medicoes").select("*").eq("obra_id", obra_id)
-        while True:
-            resp = q.range(page * size, (page + 1) * size - 1).execute()
-            rows.extend(resp.data)
-            if len(resp.data) < size: break
-            page += 1
-        df = pd.DataFrame(rows)
+        df = fetch_all("medicoes", "*", obra_id=obra_id)
         if df.empty: return df
         df = df[df["tipo"].str.strip().str.upper() != "NOTA FISCAL CANCELADA"].copy()
         df["valor"]        = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
@@ -2375,29 +2491,43 @@ elif pagina_selecionada == "💰 Financeiro":
     def _carregar_volumes(tabela, col_vol, col_data):
         """Carrega (obra_id, peca, col_vol) com deduplicação por (obra_id, peca).
         Deduplicar evita contagem dobrada quando a importação foi executada mais de uma vez."""
-        rows, page, size = [], 0, 1000
-        q = supabase.table(tabela).select(f"obra_id, peca, {col_vol}")
-        while True:
-            resp = q.range(page * size, (page + 1) * size - 1).execute()
-            rows.extend(resp.data)
-            if len(resp.data) < size: break
-            page += 1
-        if not rows: return {}
-        df = pd.DataFrame(rows)
+        df = fetch_all(tabela, f"obra_id, peca, {col_vol}")
+        if df.empty: return {}
         df[col_vol] = pd.to_numeric(df[col_vol], errors="coerce").fillna(0)
         return df.groupby("obra_id")[col_vol].sum().to_dict()
 
     @st.cache_data(ttl=900)
     def volume_fabricado_por_obra():
-        return _carregar_volumes("producao_fabricacao", "volume_teorico", "data_fabricacao")
+        df = pd.DataFrame(
+            supabase.table("mv_fabricacao_mensal")
+            .select("obra_id, vol_teorico").execute().data or []
+        )
+        if df.empty:
+            return {}
+        df["vol_teorico"] = pd.to_numeric(df["vol_teorico"], errors="coerce").fillna(0)
+        return df.groupby("obra_id")["vol_teorico"].sum().to_dict()
 
     @st.cache_data(ttl=900)
     def volume_expedido_por_obra():
-        return _carregar_volumes("producao_transporte", "volume_real", "data_expedicao")
+        df = pd.DataFrame(
+            supabase.table("mv_transporte_mensal")
+            .select("obra_id, vol_real").execute().data or []
+        )
+        if df.empty:
+            return {}
+        df["vol_real"] = pd.to_numeric(df["vol_real"], errors="coerce").fillna(0)
+        return df.groupby("obra_id")["vol_real"].sum().to_dict()
 
     @st.cache_data(ttl=900)
     def volume_montado_por_obra():
-        return _carregar_volumes("producao_montagem", "volume_teorico", "data_montagem")
+        df = pd.DataFrame(
+            supabase.table("mv_montagem_mensal")
+            .select("obra_id, vol_montado").execute().data or []
+        )
+        if df.empty:
+            return {}
+        df["vol_montado"] = pd.to_numeric(df["vol_montado"], errors="coerce").fillna(0)
+        return df.groupby("obra_id")["vol_montado"].sum().to_dict()
 
     # ── FUNÇÕES DE CÁLCULO ────────────────────────────────────
 
@@ -2456,12 +2586,7 @@ elif pagina_selecionada == "💰 Financeiro":
 
     hdr1, hdr2 = st.columns([6, 1])
     if hdr2.button("🔄 Atualizar", key="btn_fin_refresh"):
-        carregar_obras_financeiro.clear()
-        carregar_medicoes.clear()
-        carregar_medicoes_completas.clear()
-        volume_fabricado_por_obra.clear()
-        volume_expedido_por_obra.clear()
-        volume_montado_por_obra.clear()
+        limpar_todos_caches()
         st.rerun()
 
     tab_cart, tab_obra = st.tabs(["📊 Carteira", "🏗️ Obra"])
@@ -2966,16 +3091,8 @@ elif pagina_selecionada == "🏭 Produção":
     @st.cache_data(ttl=900)
     def carregar_custos_prod():
         """Carrega custos com conta_gerencial para análise de eficiência R$/m³."""
-        rows, page, size = [], 0, 1000
-        while True:
-            resp = (supabase.table("custos")
-                    .select("data, centro_custos, conta_gerencial, conta_macro, valor_global")
-                    .range(page * size, (page + 1) * size - 1)
-                    .execute())
-            rows.extend(resp.data)
-            if len(resp.data) < size: break
-            page += 1
-        df = pd.DataFrame(rows)
+        df = fetch_all("custos",
+                       "data, centro_custos, conta_gerencial, conta_macro, valor_global")
         if df.empty: return df
         df["valor_global"] = pd.to_numeric(df["valor_global"], errors="coerce").fillna(0)
         df["data_dt"]  = pd.to_datetime(df["data"], errors="coerce")
@@ -3650,21 +3767,13 @@ elif pagina_selecionada == "🏭 Produção":
             # Carregar todos os dados históricos (sem filtro temporal) para média
             @st.cache_data(ttl=900)
             def carregar_fabricacao_historico():
-                def _q(cols):
-                    rows, page, size = [], 0, 5000
-                    q = supabase.table("producao_fabricacao").select(cols)
-                    while True:
-                        resp = q.range(page * size, (page + 1) * size - 1).execute()
-                        rows.extend(resp.data)
-                        if len(resp.data) < size: break
-                        page += 1
-                    return rows
                 try:
-                    rows = _q("obra_id, produto, volume_total, peso_aco,"
-                              " peso_aco_frouxo, peso_aco_protendido")
+                    df = fetch_all("producao_fabricacao",
+                                   "obra_id, produto, volume_total, peso_aco,"
+                                   " peso_aco_frouxo, peso_aco_protendido")
                 except Exception:
-                    rows = _q("obra_id, produto, volume_total, peso_aco")
-                df = pd.DataFrame(rows)
+                    df = fetch_all("producao_fabricacao",
+                                   "obra_id, produto, volume_total, peso_aco")
                 if df.empty: return df
                 for col in ["volume_total", "peso_aco", "peso_aco_frouxo", "peso_aco_protendido"]:
                     if col not in df.columns: df[col] = 0.0
@@ -4181,16 +4290,9 @@ elif pagina_selecionada == "🔍 Análise da Obra":
 
     @st.cache_data(ttl=600)
     def _fab_obra(obra_id):
-        rows, page, size = [], 0, 5000
-        q = supabase.table("producao_fabricacao")\
-            .select("peca, produto, volume_teorico, data_fabricacao")\
-            .eq("obra_id", obra_id)
-        while True:
-            resp = q.range(page * size, (page + 1) * size - 1).execute()
-            rows.extend(resp.data)
-            if len(resp.data) < size: break
-            page += 1
-        df = pd.DataFrame(rows)
+        df = fetch_all("producao_fabricacao",
+                       "peca, produto, volume_teorico, data_fabricacao",
+                       obra_id=obra_id)
         if not df.empty:
             df["volume_teorico"] = pd.to_numeric(df["volume_teorico"], errors="coerce").fillna(0)
             df["data_fabricacao"] = pd.to_datetime(df["data_fabricacao"], errors="coerce")
@@ -4198,16 +4300,9 @@ elif pagina_selecionada == "🔍 Análise da Obra":
 
     @st.cache_data(ttl=600)
     def _exp_obra(obra_id):
-        rows, page, size = [], 0, 5000
-        q = supabase.table("producao_transporte")\
-            .select("produto, volume_real, data_expedicao")\
-            .eq("obra_id", obra_id)
-        while True:
-            resp = q.range(page * size, (page + 1) * size - 1).execute()
-            rows.extend(resp.data)
-            if len(resp.data) < size: break
-            page += 1
-        df = pd.DataFrame(rows)
+        df = fetch_all("producao_transporte",
+                       "produto, volume_real, data_expedicao",
+                       obra_id=obra_id)
         if not df.empty:
             df["volume_real"] = pd.to_numeric(df["volume_real"], errors="coerce").fillna(0)
             df["data_expedicao"] = pd.to_datetime(df["data_expedicao"], errors="coerce")
@@ -4215,16 +4310,9 @@ elif pagina_selecionada == "🔍 Análise da Obra":
 
     @st.cache_data(ttl=600)
     def _mont_obra(obra_id):
-        rows, page, size = [], 0, 5000
-        q = supabase.table("producao_montagem")\
-            .select("produto, volume_teorico, data_montagem")\
-            .eq("obra_id", obra_id)
-        while True:
-            resp = q.range(page * size, (page + 1) * size - 1).execute()
-            rows.extend(resp.data)
-            if len(resp.data) < size: break
-            page += 1
-        df = pd.DataFrame(rows)
+        df = fetch_all("producao_montagem",
+                       "produto, volume_teorico, data_montagem",
+                       obra_id=obra_id)
         if not df.empty:
             df["volume_teorico"] = pd.to_numeric(df["volume_teorico"], errors="coerce").fillna(0)
             df["data_montagem"] = pd.to_datetime(df["data_montagem"], errors="coerce")
@@ -4233,16 +4321,9 @@ elif pagina_selecionada == "🔍 Análise da Obra":
     @st.cache_data(ttl=600)
     def _medicoes_obra(obra_id):
         try:
-            rows, page, size = [], 0, 1000
-            q = supabase.table("medicoes")\
-                .select("numero_nf, tipo, valor, data_emissao")\
-                .eq("obra_id", obra_id)
-            while True:
-                resp = q.range(page * size, (page + 1) * size - 1).execute()
-                rows.extend(resp.data)
-                if len(resp.data) < size: break
-                page += 1
-            df = pd.DataFrame(rows)
+            df = fetch_all("medicoes",
+                           "numero_nf, tipo, valor, data_emissao",
+                           obra_id=obra_id)
             if df.empty: return df
             df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
             df["data_emissao"] = pd.to_datetime(df["data_emissao"], errors="coerce")
@@ -4902,18 +4983,9 @@ elif pagina_selecionada == "👷 Folha / RH":
 
     @st.cache_data(ttl=600)
     def carregar_folha_historico():
-        rows, page, size = [], 0, 1000
-        q = supabase.table("folha").select(
-            "mes, situacao, proventos, valor_funcionario, soma_hes, "
-            "vale_transporte, alimentacao, seguro_vida, assistencia_medica"
-        )
-        while True:
-            resp = q.range(page * size, (page + 1) * size - 1).execute()
-            rows.extend(resp.data)
-            if len(resp.data) < size:
-                break
-            page += 1
-        df = pd.DataFrame(rows)
+        df = fetch_all("folha",
+                       "mes, situacao, proventos, valor_funcionario, soma_hes, "
+                       "vale_transporte, alimentacao, seguro_vida, assistencia_medica")
         if df.empty:
             return df
         for c in ["proventos", "valor_funcionario", "soma_hes",
@@ -4946,9 +5018,7 @@ elif pagina_selecionada == "👷 Folha / RH":
     sit_sel = fh2.selectbox("Situação", sit_opcoes, key="folha_sit_sel", label_visibility="collapsed")
 
     if fh3.button("🔄 Atualizar", key="btn_folha_refresh"):
-        carregar_folha_meses.clear()
-        carregar_folha_mes.clear()
-        carregar_folha_historico.clear()
+        limpar_todos_caches()
         st.rerun()
 
     # ── CARREGA DADOS DO MÊS ─────────────────────────────────────────────────
@@ -5411,49 +5481,9 @@ elif pagina_selecionada == "💸 Custos & Despesas":
                     " valor_global, qtd, preco_unitario, origem, chave_coligada, cod_tipo_doc")
 
     # ── Funções de carga ─────────────────────────────────────
-    @st.cache_data(ttl=120)
-    def carregar_custos_dashboard():
-        rows, page, size = [], 0, 5000
-        while True:
-            resp = (supabase.table("custos").select(_COLS_CUSTOS)
-                    .range(page * size, (page + 1) * size - 1).execute())
-            rows.extend(resp.data)
-            if len(resp.data) < size:
-                break
-            page += 1
-        df = pd.DataFrame(rows)
-        if df.empty:
-            return df
-        df = df.dropna(subset=["data"])
-        return _enriquecer_df(df)
-
-    @st.cache_data(ttl=120)
-    def carregar_despesas_dashboard():
-        rows, page, size = [], 0, 5000
-        while True:
-            resp = (supabase.table("despesas").select(_COLS_CUSTOS)
-                    .range(page * size, (page + 1) * size - 1).execute())
-            rows.extend(resp.data)
-            if len(resp.data) < size:
-                break
-            page += 1
-        df = pd.DataFrame(rows)
-        if df.empty:
-            return df
-        df = df.dropna(subset=["data"])
-        return _enriquecer_df(df)
-
     @st.cache_data(ttl=600)
     def carregar_receitas_dashboard():
-        rows, page, size = [], 0, 5000
-        while True:
-            resp = (supabase.table("receitas").select("*")
-                    .range(page * size, (page + 1) * size - 1).execute())
-            rows.extend(resp.data)
-            if len(resp.data) < size:
-                break
-            page += 1
-        df = pd.DataFrame(rows)
+        df = fetch_all("receitas", "*")
         if df.empty:
             return df
         # Normaliza coluna de data (pode ser "data" ou "data_emissao")
@@ -5469,16 +5499,7 @@ elif pagina_selecionada == "💸 Custos & Despesas":
 
     @st.cache_data(ttl=600)
     def carregar_medicoes_faturamento():
-        rows, page, size = [], 0, 5000
-        while True:
-            resp = (supabase.table("medicoes")
-                    .select("obra_id, data_emissao, tipo, valor, descricao")
-                    .range(page * size, (page + 1) * size - 1).execute())
-            rows.extend(resp.data)
-            if len(resp.data) < size:
-                break
-            page += 1
-        df = pd.DataFrame(rows)
+        df = fetch_all("medicoes", "obra_id, data_emissao, tipo, valor, descricao")
         if df.empty:
             return df
         df = df[~df["tipo"].isin(["NOTA FISCAL CANCELADA", "NOTA FISCAL REMESSA"])]
@@ -5489,16 +5510,7 @@ elif pagina_selecionada == "💸 Custos & Despesas":
 
     @st.cache_data(ttl=300)
     def carregar_producao_mensal():
-        rows, page, size = [], 0, 5000
-        while True:
-            resp = (supabase.table("producao_fabricacao")
-                    .select("data_fabricacao, volume_teorico")
-                    .range(page * size, (page + 1) * size - 1).execute())
-            rows.extend(resp.data)
-            if len(resp.data) < size:
-                break
-            page += 1
-        df = pd.DataFrame(rows)
+        df = fetch_all("producao_fabricacao", "data_fabricacao, volume_teorico")
         if df.empty:
             return pd.Series(dtype=float)
         df["volume_teorico"] = pd.to_numeric(df["volume_teorico"], errors="coerce").fillna(0)
@@ -5506,13 +5518,7 @@ elif pagina_selecionada == "💸 Custos & Despesas":
         return df.groupby("mes")["volume_teorico"].sum()
 
     def _limpar_caches_custos():
-        for fn in [carregar_custos_dashboard, carregar_despesas_dashboard,
-                   carregar_receitas_dashboard, carregar_medicoes_faturamento,
-                   carregar_producao_mensal]:
-            try:
-                fn.clear()
-            except Exception:
-                pass
+        limpar_todos_caches()
 
     # ── Cabeçalho ────────────────────────────────────────────
     h1, h2 = st.columns([8, 1])
@@ -5523,36 +5529,21 @@ elif pagina_selecionada == "💸 Custos & Despesas":
 
     # ── Carga dos dados ──────────────────────────────────────
     with st.spinner("Carregando dados..."):
-        df_cus = carregar_custos_dashboard()
-        df_des = carregar_despesas_dashboard()
+        df_all = carregar_custos_completo()
         df_rec = carregar_receitas_dashboard()
 
-    st.caption(
-        f"📦 Fonte: **{len(df_cus)}** registros de Custos · "
-        f"**{len(df_des)}** de Despesas · "
-        f"**{len(df_rec)}** de Receitas"
-        + (" ⚠️ — Tabela Custos vazia! Vá ao Importador → Rota 7." if df_cus.empty else "")
-    )
-
-    if df_cus.empty and df_des.empty:
-        st.warning("Nenhum dado encontrado nas tabelas custos/despesas.")
+    if df_all.empty:
+        st.warning("Nenhum dado encontrado. Importe os arquivos pelas Rotas 7 e 10.")
         st.stop()
 
-    if not df_cus.empty:
-        df_cus["origem"] = "Custo"
-    if not df_des.empty:
-        df_des["origem"] = "Despesa"
+    # Separa para compatibilidade com abas que filtram por origem
+    df_cus = df_all[df_all["origem"] == "Custo"].copy()
+    df_des = df_all[df_all["origem"] == "Despesa"].copy()
 
-    _cols_comuns = ["data","mes","ano","cod4","centro_custos","conta_gerencial",
-                    "conta_macro","cli_fornecedor","produto_servico","criado_por",
-                    "valor_global","valor_abs","origem","tipo_centro","grupo_custo",
-                    "cod_tipo_doc","id_lancamento"]
-    def _sel_cols(df, cols):
-        return df[[c for c in cols if c in df.columns]]
-
-    df_all = pd.concat(
-        [_sel_cols(df_cus, _cols_comuns), _sel_cols(df_des, _cols_comuns)],
-        ignore_index=True
+    st.caption(
+        f"📦 Fonte (view): **{len(df_cus)}** Custos · "
+        f"**{len(df_des)}** Despesas · "
+        f"**{len(df_rec)}** Receitas"
     )
 
     # ── Filtros globais ──────────────────────────────────────
